@@ -38,6 +38,7 @@ log = logging.getLogger("multi")
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 MAX_COURSES = 15          # por usuario, para no saturar datateca
 MAX_CODES_PER_MESSAGE = 15
+FAIL_ALERT_AFTER = 3      # revisiones seguidas sin poder leer una agenda antes de avisar (~1 h)
 LINK_RE = re.compile(r"agendas/(\d{4}-\d{3,5})/(\d{5,10})\.htm", re.I)
 CODE_RE = re.compile(r"(?<![\d/.-])\d{5,10}(?!\d)")
 
@@ -926,7 +927,14 @@ def run_multi(dry_run: bool = False) -> int:
     agendas.update({c: cache[c] for c in needed if c in cache})
 
     quiet = W.in_quiet_hours(now)
-    sent, errors = notify_users(db, agendas, failed, now, quiet, dry_run)
+    # una falla momentánea de datateca no se avisa: solo si persiste FAIL_ALERT_AFTER revisiones
+    streak = db.state.setdefault("fail_streak", {})
+    for code in needed:
+        streak[code] = streak.get(code, 0) + 1 if code in failed else 0
+    streak = {c: n for c, n in streak.items() if n}
+    db.state["fail_streak"] = streak
+    persistent = [c for c in failed if streak.get(c, 0) >= FAIL_ALERT_AFTER]
+    sent, errors = notify_users(db, agendas, persistent, now, quiet, dry_run)
     if not dry_run:
         answer_summaries(db, wants, agendas, now)
         if not quiet and not errors:
@@ -934,4 +942,9 @@ def run_multi(dry_run: bool = False) -> int:
         db.save()
     log.info("Revisión multiusuario: %d usuarios, %d cursos OK, %d con error, %d avisos%s",
              len(db.approved()), len(agendas), len(failed), sent, " (silencio)" if quiet else "")
-    return 1 if (failed or errors) else 0
+    if failed:
+        log.warning("%d agenda(s) no se pudieron leer en esta revisión (se reintenta en la próxima)",
+                    len(failed))
+    # 0 = la revisión terminó. Fallas de datateca o de un envío no marcan la ejecución como fallida
+    # (GitHub mandaría un correo de "falló"); un error de programación sí la marca, porque no se atrapa.
+    return 0

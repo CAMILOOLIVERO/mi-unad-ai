@@ -24,6 +24,7 @@ import json
 import logging
 import re
 import sys
+import time
 import unicodedata
 import urllib.error
 import urllib.request
@@ -390,10 +391,21 @@ def decode_html(raw: bytes, content_type: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def fetch(url: str) -> str:
+def fetch(url: str, attempts: int = 3) -> str:
+    """Descarga una agenda. Si datateca corta la conexión, reintenta (404 no: es "no existe")."""
     req = urllib.request.Request(url, headers={"User-Agent": "MiUNADAI-agenda/0.1 (uso personal)"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return decode_html(resp.read(), resp.headers.get("Content-Type", ""))
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return decode_html(resp.read(), resp.headers.get("Content-Type", ""))
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500 or attempt == attempts - 1:
+                raise
+        except (urllib.error.URLError, OSError):
+            if attempt == attempts - 1:
+                raise
+        time.sleep(3 * (attempt + 1))
+    raise OSError("sin respuesta")  # no se alcanza
 
 
 # ================================================================ informe

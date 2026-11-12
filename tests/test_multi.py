@@ -431,6 +431,27 @@ class MismoCursoDosPeriodosTest(Base):
         self.assertNotIn("ocr_pending", self.db().user(CAMILO))
 
 
+class FallasDatatecaTest(Base):
+    def test_falla_momentanea_no_avisa_y_persistente_si(self):
+        self.tg.msg(CAMILO, f"/start {ADMIN_CODE}")
+        self.run_bot()
+        self.tg.sent.clear()
+        real_fetch = fake_fetch_factory([])
+
+        def flaky(url):
+            if "102437374" in url:
+                raise urllib.error.URLError(ConnectionResetError(104, "Connection reset by peer"))
+            return real_fetch(url)
+        with mock.patch.object(W, "fetch", flaky):
+            for i in range(2):                                  # 2 revisiones fallando: silencio
+                self.assertEqual(self.run_bot(datetime(2026, 11, 12, 11, 7 + i * 30 // 60, tzinfo=BOGOTA)), 0)
+            self.assertFalse(any("No pude leer" in t for t in self.tg.to(CAMILO)))
+            self.run_bot(datetime(2026, 11, 12, 12, 7, tzinfo=BOGOTA))  # 3.ª seguida: ahora sí avisa
+        self.assertTrue(any("No pude leer" in t and "Formulación" in t for t in self.tg.to(CAMILO)))
+        self.run_bot(datetime(2026, 11, 12, 12, 37, tzinfo=BOGOTA))     # vuelve a funcionar
+        self.assertEqual(self.db().state["fail_streak"], {})
+
+
 class ReceptorTest(Base):
     def test_activa_receptor_y_mientras_tanto_sigue_pidiendo_mensajes(self):
         self.tg.msg(CAMILO, f"/start {ADMIN_CODE}")

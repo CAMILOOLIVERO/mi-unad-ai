@@ -60,6 +60,36 @@ class NombreCursoTest(unittest.TestCase):
         self.assertEqual(len({a.external_id for a in ag.activities}), 2)
 
 
+class FetchReintentosTest(unittest.TestCase):
+    def test_reintenta_si_cortan_la_conexion_pero_no_si_es_404(self):
+        import urllib.error
+        calls = []
+
+        class Resp:
+            headers = {"Content-Type": "text/html; charset=utf-8"}
+            def read(self): return b"<html>ok</html>"
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def flaky(req, timeout=30):
+            calls.append(1)
+            if len(calls) < 3:
+                raise urllib.error.URLError(ConnectionResetError(104, "reset"))
+            return Resp()
+        with mock.patch.object(S.urllib.request, "urlopen", flaky), mock.patch.object(S.time, "sleep", lambda s: None):
+            self.assertIn("ok", S.fetch("https://x/1.htm"))
+        self.assertEqual(len(calls), 3)
+
+        calls.clear()
+        def not_found(req, timeout=30):
+            calls.append(1)
+            raise urllib.error.HTTPError("u", 404, "nf", {}, None)
+        with mock.patch.object(S.urllib.request, "urlopen", not_found):
+            with self.assertRaises(urllib.error.HTTPError):
+                S.fetch("https://x/2.htm")
+        self.assertEqual(len(calls), 1)
+
+
 class ConfigTest(unittest.TestCase):
     def load(self, data):
         with tempfile.TemporaryDirectory() as d:
