@@ -292,16 +292,38 @@ class EntregasYColaTest(Base):
         (qdir / "9001.json").write_text(json.dumps(upd))
         with mock.patch.dict("os.environ", {"TELEGRAM_WEBHOOK_URL": "https://x.workers.dev",
                                             "TELEGRAM_WEBHOOK_SECRET": "s"}):
+            db = self.db()
+            db.state["webhook"] = "https://x.workers.dev"   # receptor ya confirmado
+            db.save()
             with mock.patch.object(MU, "get_updates", side_effect=AssertionError("no debe llamarse")):
                 self.run_bot()
                 self.assertIn("Tus cursos", self.tg.to(CAMILO)[-1])
                 self.assertFalse(list(qdir.glob("*.json")))            # la cola quedó vacía
-                self.assertEqual(self.webhooks, ["https://x.workers.dev"])
                 # Telegram reenvía el mismo mensaje: no se atiende dos veces
                 (qdir / "9001.json").write_text(json.dumps(upd))
                 n = len(self.tg.sent)
                 self.run_bot()
                 self.assertEqual(len(self.tg.sent), n)
+
+
+class ReceptorTest(Base):
+    def test_activa_receptor_y_mientras_tanto_sigue_pidiendo_mensajes(self):
+        self.tg.msg(CAMILO, f"/start {ADMIN_CODE}")
+        env = {"TELEGRAM_WEBHOOK_URL": "https://x.workers.dev", "TELEGRAM_WEBHOOK_SECRET": "ok_clave-1"}
+        with mock.patch.dict("os.environ", env):
+            self.run_bot()                                  # aún no conectado: pide mensajes
+        self.assertIsNotNone(self.db().admin_id())
+        self.assertEqual(self.webhooks, ["https://x.workers.dev"])
+        self.assertEqual(self.db().state["webhook"], "https://x.workers.dev")
+
+    def test_clave_invalida_no_rompe_nada(self):
+        self.tg.msg(CAMILO, f"/start {ADMIN_CODE}")
+        env = {"TELEGRAM_WEBHOOK_URL": "https://x.workers.dev", "TELEGRAM_WEBHOOK_SECRET": "mala clave!"}
+        with mock.patch.dict("os.environ", env):
+            self.run_bot()
+        self.assertIsNotNone(self.db().admin_id())         # el mensaje sí se atendió
+        self.assertEqual(self.webhooks, [])                 # no se intentó conectar
+        self.assertNotIn("webhook", self.db().state)
 
 
 class FotoTest(Base):

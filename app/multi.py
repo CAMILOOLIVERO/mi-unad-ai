@@ -419,8 +419,10 @@ def read_queue(db: DB) -> list[dict]:
 def process_updates(db: DB, cache: dict[str, CourseAgenda], admin_code: str) -> set[str]:
     """Atiende todo lo pendiente en Telegram. Devuelve los usuarios que pidieron /encurso."""
     updates = read_queue(db)
-    # con receptor (webhook) Telegram ya no permite pedir mensajes: solo se lee la cola
-    if not os.environ.get("TELEGRAM_WEBHOOK_URL", "").strip():
+    # con el receptor ya conectado, Telegram no permite pedir mensajes: solo se lee la cola.
+    # Mientras no esté confirmado (o si la clave es inválida), se siguen pidiendo como siempre.
+    webhook_url = os.environ.get("TELEGRAM_WEBHOOK_URL", "").strip()
+    if not webhook_url or db.state.get("webhook") != webhook_url:
         offset = db.state.get("tg_offset")
         updates += get_updates(offset + 1 if offset is not None else None)
     last = db.state.get("tg_offset") or 0
@@ -452,6 +454,9 @@ def ensure_webhook(db: DB) -> None:
     url = os.environ.get("TELEGRAM_WEBHOOK_URL", "").strip()
     secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip()
     if url and secret and db.state.get("webhook") != url:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", secret):
+            log.error("TELEGRAM_WEBHOOK_SECRET solo admite letras sin tilde, números, '-' y '_'")
+            return
         set_webhook(url, secret)
         db.state["webhook"] = url
         log.info("Modo inmediato activado")
@@ -710,14 +715,21 @@ def run_multi(dry_run: bool = False) -> int:
     wants: set[str] = set()
 
     if not dry_run:
+        # cada paso por separado: si uno falla, los demás siguen
         try:
             if not db.state.get("commands_v3"):
                 set_commands(COMMANDS)
                 db.state["commands_v3"] = True
-            ensure_webhook(db)
+        except TelegramError as exc:
+            log.error("No se pudo registrar el menú de comandos: %s", exc)
+        try:
             wants = process_updates(db, cache, os.environ.get("TELEGRAM_ADMIN_CODE", "").strip())
         except TelegramError as exc:
             log.error("No se pudieron leer los mensajes de Telegram: %s", exc)
+        try:
+            ensure_webhook(db)
+        except TelegramError as exc:
+            log.error("No se pudo activar el modo inmediato: %s", exc)
 
     # cada curso se descarga una sola vez aunque lo tengan varios usuarios
     needed: dict[str, str] = {}
