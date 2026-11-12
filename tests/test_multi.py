@@ -326,6 +326,28 @@ class EntregasYColaTest(Base):
         self.run_bot()
         self.assertEqual(self.db().user(CAMILO)["delivered"], {})
 
+    def test_resumen_avisa_las_entregadas_y_quitar_curso_las_limpia(self):
+        self.claim()
+        ext = "102437376:fase-2-introduccion-al-estandar-p5-del-gpm"
+        db = self.db()
+        db.user(CAMILO)["delivered"][ext] = "2026-11-12T13:30:00-05:00"
+        db.save()
+        self.tg.msg(CAMILO, "/encurso")
+        self.run_bot()
+        resumen = self.tg.to(CAMILO)[-1]
+        self.assertNotIn("Introducción al estándar P5", resumen)
+        self.assertIn("1 actividad marcada como entregada", resumen)
+        # quitar el curso y volver a agregarlo: la marca ya no existe
+        self.tg.msg(CAMILO, "/quitar 102437376")
+        self.run_bot()
+        self.assertEqual(self.db().user(CAMILO)["delivered"], {})
+        self.tg.msg(CAMILO, "https://datateca.unad.edu.co/contenidos/agendas/2026-2205/102437376.htm")
+        self.tg.msg(CAMILO, "/encurso")
+        self.run_bot()
+        resumen = self.tg.to(CAMILO)[-1]
+        self.assertIn("Introducción al estándar P5", resumen)
+        self.assertNotIn("marcada como entregada", resumen)
+
     def test_otro_usuario_no_puede_marcar_mis_entregas(self):
         self.claim()
         db = self.db()

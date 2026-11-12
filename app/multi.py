@@ -253,6 +253,9 @@ def remove_course(db: DB, uid: str, code: str) -> str:
     user["courses"] = [c for c in user["courses"] if c["code"] != code]
     if len(user["courses"]) == before:
         return f"No tenías el curso {esc(code)}."
+    # las marcas de "entregada" de ese curso también se borran: si se vuelve a agregar, empieza limpio
+    user["delivered"] = {ext: v for ext, v in user.get("delivered", {}).items()
+                         if not ext.startswith(f"{code}:")}
     us = db.ustate(uid)
     us["seen"] = [c for c in us["seen"] if c != code]
     # claves tipo "due:<código>:<actividad>:d7" / "error:<código>:<fecha>"
@@ -841,8 +844,9 @@ def notify_users(db: DB, agendas: dict, failed: list[str], now: datetime, quiet:
         us = db.ustate(uid)
         pending = {k for m in msgs for k in m.keys}
         for m in msgs:
+            text = m.text + (delivered_note(db, uid, now) if m.key.startswith("summary:") else "")
             try:
-                send_message(m.text, uid, buttons=delivery_buttons(db, m.keys) or None)
+                send_message(text, uid, buttons=delivery_buttons(db, m.keys) or None)
                 for k in m.keys:
                     new["sent"][k] = now.isoformat()
                     pending.discard(k)
@@ -875,6 +879,22 @@ def update_snapshot(db: DB, agendas: dict[str, CourseAgenda]) -> None:
     db.state["activities"] = acts
 
 
+def delivered_note(db: DB, uid: str, now: datetime) -> str:
+    """Las entregadas no se esconden en silencio: el resumen dice cuántas hay."""
+    user = db.user(uid)
+    codes = user_codes(db, uid)
+    n = 0
+    for ext in user.get("delivered", {}):
+        snap = db.state["activities"].get(ext, {})
+        due = W.to_dt(snap.get("due_at"))
+        if snap.get("course") in codes and due and due > now:
+            n += 1
+    if not n:
+        return ""
+    return (f"\n\n✅ {n} actividad{'es' if n != 1 else ''} marcada{'s' if n != 1 else ''} como "
+            f"entregada{'s' if n != 1 else ''} (no aparece{'n' if n != 1 else ''} arriba) · /entregadas para verlas")
+
+
 def answer_summaries(db: DB, wants: set[str], agendas: dict, now: datetime) -> None:
     for uid in wants:
         courses, uag, _, _ = user_view(db, uid, agendas, [])
@@ -883,7 +903,7 @@ def answer_summaries(db: DB, wants: set[str], agendas: dict, now: datetime) -> N
             continue
         names = {c["code"]: c.get("name") or c["code"] for c in courses}
         try:
-            send_message(W.build_summary(uag, names, now), uid)
+            send_message(W.build_summary(uag, names, now) + delivered_note(db, uid, now), uid)
         except TelegramError as exc:
             log.error("No se pudo enviar un resumen: %s", exc)
 
