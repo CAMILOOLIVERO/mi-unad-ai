@@ -7,7 +7,9 @@
 // Si algo falla al guardar, responde error y Telegram reintenta solo: no se pierde nada.
 //
 // Variables del Worker (Settings → Variables and Secrets):
-//   GITHUB_TOKEN             (Secret)  token con Contents R/W en mi-unad-ai-data y Actions R/W en mi-unad-ai
+//   DATA_TOKEN               (Secret)  token SOLO de mi-unad-ai-data con Contents: Read and write
+//   DISPATCH_TOKEN           (Secret)  token SOLO de mi-unad-ai con Actions: Read and write
+//   (dos llaves separadas: si una se filtra, no sirve para modificar el código del bot)
 //   TELEGRAM_WEBHOOK_SECRET  (Secret)  la misma clave guardada en GitHub
 //   OWNER                    (Text)    CAMILOOLIVERO
 //   TELEGRAM_BOT_TOKEN       (Secret, opcional) para responder "Procesando…" al instante en los botones
@@ -27,11 +29,11 @@ export default {
       return new Response("ok"); // nada que hacer
     }
 
-    const github = (path, method, body) =>
+    const github = (token, path, method, body) =>
       fetch(`https://api.github.com${path}`, {
         method,
         headers: {
-          Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+          Authorization: `Bearer ${token}`,
           Accept: "application/vnd.github+json",
           "X-GitHub-Api-Version": "2022-11-28",
           "User-Agent": "mi-unad-ai-receptor",
@@ -44,6 +46,7 @@ export default {
     let binary = "";
     for (const b of bytes) binary += String.fromCharCode(b);
     const saved = await github(
+      env.DATA_TOKEN,
       `/repos/${env.OWNER}/mi-unad-ai-data/contents/data/queue/${id}.json`,
       "PUT",
       { message: `cola ${id}`, content: btoa(binary) },
@@ -64,6 +67,7 @@ export default {
 
     // 3) despertar al bot en GitHub
     await github(
+      env.DISPATCH_TOKEN,
       `/repos/${env.OWNER}/mi-unad-ai/actions/workflows/watcher.yml/dispatches`,
       "POST",
       { ref: "main" },
