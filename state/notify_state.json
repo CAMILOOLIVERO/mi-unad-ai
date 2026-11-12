@@ -244,5 +244,7 @@
     "202016902": "Administración de Bases de Datos",
     "212064": "Inferencia Estadística",
     "202016907": "Proyecto de Grado"
-  }
+  },
+  "commands_set": true,
+  "tg_offset": 430719521
 }
