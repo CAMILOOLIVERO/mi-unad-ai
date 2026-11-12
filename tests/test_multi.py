@@ -382,7 +382,7 @@ class FotoTest(Base):
             self.run_bot()
         self.assertEqual(downloads, ["grande"])                      # la foto de mayor calidad
         text = [t for c, t, b in self.tg.sent if c == EDUARDO and "Encontré" in t][0]
-        self.assertIn("Encontré <b>2 cursos</b>", text)
+        self.assertIn("Encontré <b>2 cursos nuevos</b>", text)
         self.assertIn("Ya tenías: Formulación Integral de Proyectos", text)
         self.assertIn("Descarté 1 número", text)                     # el número falso del OCR
         botones = self.last_buttons(EDUARDO)
@@ -414,7 +414,17 @@ class FotoTest(Base):
         with p1, p2:
             self.send_photo(EDUARDO)
             self.run_bot()
-        self.assertTrue(any("No encontré cursos nuevos" in t for t in self.tg.to(EDUARDO)))
+        self.assertTrue(any("No pude leer códigos de curso" in t for t in self.tg.to(EDUARDO)))
+
+    def test_lectura_parcial_no_dice_que_tiene_todos(self):
+        p1, p2, _ = self.ocr(["102437374"])          # solo leyó un código, y ya lo tenía
+        with p1, p2:
+            self.send_photo(EDUARDO)
+            self.run_bot()
+        reply = [t for t in self.tg.to(EDUARDO) if "Leí 1 código" in t][0]
+        self.assertIn("Formulación Integral de Proyectos", reply)
+        self.assertNotIn("todos", reply)
+        self.assertIn("como <b>archivo</b>", reply)
 
     def test_sin_ocr_disponible(self):
         def no_ocr(data):

@@ -244,12 +244,13 @@ def photo_file_id(msg: dict) -> str | None:
 def ocr_message(db: DB, uid: str) -> tuple[str, list[list[tuple[str, str]]]]:
     pend = db.user(uid).get("ocr_pending") or {}
     items, selected = pend.get("items", []), set(pend.get("selected", []))
-    lines = [f"📸 Encontré <b>{len(items)} curso{'s' if len(items) != 1 else ''}</b> en tu captura.",
+    lines = [f"📸 Encontré <b>{len(items)} curso{'s' if len(items) != 1 else ''} nuevo{'s' if len(items) != 1 else ''}</b> en tu captura.",
              "Toca un curso para marcarlo o desmarcarlo y luego <b>Agregar seleccionados</b>."]
     if pend.get("already"):
         lines.append("\nYa tenías: " + ", ".join(esc(n) for n in pend["already"]) + ".")
     if pend.get("discarded"):
         lines.append(f"<i>Descarté {pend['discarded']} número(s) que no correspondían a ningún curso.</i>")
+    lines.append("<i>¿Falta alguno? Escríbeme su código.</i>")
     buttons = [[(f"{'☑️' if it['code'] in selected else '⬜'} {it['name'][:45]}", f"tg:{it['code']}")]
                for it in items]
     buttons.append([(f"✅ Agregar seleccionados ({len(selected)})", "oa:"), ("✖️ Cancelar", "ox:")])
@@ -283,11 +284,14 @@ def process_photo(db: DB, uid: str, msg: dict, cache: dict[str, CourseAgenda]) -
             items.append({"code": code, "period": agenda.period, "name": agenda.name or code})
         else:
             discarded += 1
+    tip = ("\n\n💡 Si falta algún curso: envía la captura como <b>archivo</b> (📎 → Archivo) para "
+           "que llegue sin comprimir, o escríbeme su código (el número del recuadro azul).")
     if not items:
-        extra = (" Ya tienes todos los cursos de la captura." if already else
-                 " Asegúrate de que se vean los recuadros azules con los códigos, "
-                 "o envíame los códigos escritos.")
-        send_message("No encontré cursos nuevos en la imagen." + extra, uid)
+        if already:
+            names = ", ".join(esc(n) for n in already)
+            send_message(f"Leí {len(already)} código(s) en la imagen y ya los tienes: {names}." + tip, uid)
+        else:
+            send_message("No pude leer códigos de curso en la imagen." + tip, uid)
         return
     user["ocr_pending"] = {"items": items, "selected": [it["code"] for it in items],
                            "already": already, "discarded": discarded}
