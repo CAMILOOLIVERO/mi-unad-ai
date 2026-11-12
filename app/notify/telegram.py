@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 
@@ -30,7 +31,25 @@ def _env(name: str) -> str:
     return value
 
 
+# Métodos seguros de reintentar: repetirlos no duplica nada para el usuario.
+RETRY_METHODS = {"getUpdates", "getMe", "setMyCommands", "answerCallbackQuery"}
+
+
 def _call(method: str, payload: dict | None = None) -> object:
+    """Llama a la API. Reintenta 2 veces las lecturas si la conexión se cae un momento."""
+    attempts = 3 if method in RETRY_METHODS else 1
+    for attempt in range(attempts):
+        try:
+            return _call_once(method, payload)
+        except TelegramError as exc:
+            if attempt == attempts - 1 or not str(exc).startswith("Sin conexión"):
+                raise
+            log.warning("Conexión con Telegram inestable, reintentando (%d/%d)", attempt + 1, attempts - 1)
+            time.sleep(2 * (attempt + 1))
+    raise TelegramError("sin respuesta")  # no se alcanza
+
+
+def _call_once(method: str, payload: dict | None = None) -> object:
     token = _env("TELEGRAM_BOT_TOKEN")
     if not all(c.isalnum() or c in ":_-" for c in token):
         raise TelegramError("TELEGRAM_BOT_TOKEN tiene caracteres inválidos (¿espacios o saltos de línea?)")
