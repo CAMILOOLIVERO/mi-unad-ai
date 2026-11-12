@@ -53,6 +53,8 @@ def fake_fetch_factory(calls):
         calls.append(code)
         if REAL_PERIOD.get(code) == period:
             return (FIXTURES / f"{code}.htm").read_text(encoding="utf-8")
+        if code == "212064" and period == "2026-2205":   # el mismo curso, en otro periodo
+            return (FIXTURES / "212064_2205.htm").read_text(encoding="utf-8")
         raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
     return fake_fetch
 
@@ -146,8 +148,11 @@ class MultiTest(Base):
         self.run_bot()
         reply = [t for t in self.tg.to(EDUARDO) if "Vigilo" in t][-1]
         self.assertIn("✅ <b>Formulación Integral de Proyectos</b>", reply)
-        self.assertIn("✅ <b>Inferencia Estadística</b>", reply)
+        self.assertIn("❔ <b>Inferencia Estadística</b>: elige tu periodo", reply)
         self.assertIn("❓ 999999", reply)
+        with mock.patch.object(MU, "edit_message", lambda *a, **k: None):
+            self.tg.press(EDUARDO, "pc:212064:2026-2204")
+            self.run_bot()
         self.assertEqual({c["code"] for c in self.db().user(EDUARDO)["courses"]}, {"102437374", "212064"})
 
         # 5. /encurso: cada uno ve SOLO sus cursos
@@ -328,6 +333,62 @@ class EntregasYColaTest(Base):
                 self.assertEqual(len(self.tg.sent), n)
 
 
+class MismoCursoDosPeriodosTest(Base):
+    """Inferencia Estadística (212064) existe en 16-04 (2204) y en 16-05 (2205) con fechas distintas."""
+
+    def setUp(self):
+        super().setUp()
+        self.tg.msg(CAMILO, f"/start {ADMIN_CODE}")
+        self.run_bot()
+        db = self.db()
+        db.user(CAMILO)["courses"] = [c for c in db.user(CAMILO)["courses"] if c["code"] != "212064"]
+        db.save()
+        self.tg.sent.clear()
+
+    def test_codigo_escrito_pregunta_el_periodo(self):
+        self.tg.msg(CAMILO, "212064")
+        self.run_bot()
+        q = [(t, b) for c, t, b in self.tg.sent if c == CAMILO and "existe en 2 periodos" in t][0]
+        self.assertIn("Inferencia Estadística", q[0])
+        datos = [row[0][1] for row in q[1]]
+        self.assertEqual(set(datos), {"pc:212064:2026-2204", "pc:212064:2026-2205"})
+        self.assertTrue(any("16-04" in row[0][0] and "1 dic" in row[0][0] for row in q[1]))
+        self.assertNotIn("212064", {c["code"] for c in self.db().user(CAMILO)["courses"]})
+        # elige su periodo (16-04)
+        with mock.patch.object(MU, "edit_message", lambda *a, **k: None):
+            self.tg.press(CAMILO, "pc:212064:2026-2204")
+            self.run_bot()
+        curso = [c for c in self.db().user(CAMILO)["courses"] if c["code"] == "212064"][0]
+        self.assertEqual(curso["period"], "2026-2204")
+
+    def test_captura_usa_el_periodo_de_su_encabezado(self):
+        with mock.patch.object(MU, "download_file", lambda fid: b"png"), \
+             mock.patch.object(MU, "extract_codes",
+                               lambda data: (["212064"], ["2026-2204", "2026-2205"], {"212064": "2026-2204"})):
+            self.tg.inbox.append({"update_id": self.tg.next_id, "message": {
+                "chat": {"id": int(CAMILO), "type": "private"}, "from": {"id": int(CAMILO)},
+                "photo": [{"file_id": "f", "file_size": 9}]}})
+            self.tg.next_id += 1
+            self.run_bot()
+        pend = self.db().user(CAMILO)["ocr_pending"]["items"]
+        self.assertEqual(pend, [{"code": "212064", "period": "2026-2204", "name": "Inferencia Estadística",
+                                 "label": "periodo 16-04"}])
+        text = [t for c, t, b in self.tg.sent if c == CAMILO and "Encontré" in t][0]
+        self.assertIn("Inferencia Estadística <i>(periodo 16-04)</i>", text)
+        self.assertIn("Cómo funcionan los botones", text)
+
+    def test_captura_sin_periodo_legible_pregunta(self):
+        with mock.patch.object(MU, "download_file", lambda fid: b"png"), \
+             mock.patch.object(MU, "extract_codes", lambda data: (["212064"], [], {})):
+            self.tg.inbox.append({"update_id": self.tg.next_id, "message": {
+                "chat": {"id": int(CAMILO), "type": "private"}, "from": {"id": int(CAMILO)},
+                "photo": [{"file_id": "f", "file_size": 9}]}})
+            self.tg.next_id += 1
+            self.run_bot()
+        self.assertTrue(any("existe en 2 periodos" in t for t in self.tg.to(CAMILO)))
+        self.assertNotIn("ocr_pending", self.db().user(CAMILO))
+
+
 class ReceptorTest(Base):
     def test_activa_receptor_y_mientras_tanto_sigue_pidiendo_mensajes(self):
         self.tg.msg(CAMILO, f"/start {ADMIN_CODE}")
@@ -369,7 +430,8 @@ class FotoTest(Base):
     def ocr(self, codes, periods=("2026-2205", "2026-2204")):
         downloads = []
         return (mock.patch.object(MU, "download_file", lambda fid: downloads.append(fid) or b"png"),
-                mock.patch.object(MU, "extract_codes", lambda data: (list(codes), list(periods))),
+                mock.patch.object(MU, "extract_codes", lambda data: (
+                    list(codes), list(periods), {c: REAL_PERIOD[c] for c in codes if c in REAL_PERIOD})),
                 downloads)
 
     def last_buttons(self, uid):

@@ -66,8 +66,27 @@ def _ocr(tesseract: str, image: Path, psm: int) -> str:
     return result.stdout
 
 
-def extract_codes(image_bytes: bytes) -> tuple[list[str], list[str]]:
-    """Devuelve (códigos candidatos en orden de aparición, periodos candidatos 'AAAA-NNNN').
+def period_hints(texts: list[str], this_year: int) -> dict[str, str]:
+    """En "Mis Cursos" cada código aparece debajo del encabezado de su periodo
+    ("Periodo 2026 II PERIODO 16-04 (2204)"). Se asigna a cada código el último encabezado leído.
+    Importa: el MISMO código puede existir en varios periodos con fechas distintas."""
+    hints: dict[str, str] = {}
+    for text in texts:
+        current = None
+        for line in text.splitlines():
+            m = PERIOD_RE.search(line)
+            years = [y for y in YEAR_RE.findall(line) if abs(int(y) - this_year) <= 1]
+            if m and years:
+                current = f"{years[0]}-{m.group(1)}"
+            for code in CODE_RE.findall(line):
+                if current and code not in hints:
+                    hints[code] = current
+    return hints
+
+
+def extract_codes(image_bytes: bytes) -> tuple[list[str], list[str], dict[str, str]]:
+    """Devuelve (códigos candidatos en orden, periodos candidatos 'AAAA-NNNN',
+    periodo leído para cada código según el encabezado bajo el que aparece).
 
     Las fotos que envía Telegram vienen comprimidas: ninguna preparación de la imagen lee todos
     los códigos por sí sola, pero cada una falla en códigos distintos. Se combinan varias y la
@@ -106,5 +125,6 @@ def extract_codes(image_bytes: bytes) -> tuple[list[str], list[str]]:
             cand = f"{y}-{p}"
             if cand not in periods:
                 periods.append(cand)
-    log.info("OCR: %d números candidatos", len(codes))
-    return codes, periods
+    hints = period_hints(texts, this_year)
+    log.info("OCR: %d números candidatos, %d con periodo identificado", len(codes), len(hints))
+    return codes, periods, hints

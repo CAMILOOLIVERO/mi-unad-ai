@@ -151,6 +151,38 @@ def lookup(code: str, period: str | None, db: DB, cache: dict[str, CourseAgenda]
     return None
 
 
+def lookup_all(code: str, db: DB, extra_periods: list[str] | None = None) -> list[CourseAgenda]:
+    """Todas las agendas de un código. El MISMO código puede existir en varios periodos
+    (p. ej. 16-04 y 16-05) con fechas distintas: no se debe adivinar cuál es el del estudiante."""
+    found = []
+    for p in list(db.periods["known"]) + [p for p in (extra_periods or []) if p not in db.periods["known"]]:
+        url = URL_TEMPLATE.format(period=p, code=code)
+        try:
+            agenda = parse_agenda(fetch(url), code, p, url)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                continue
+            raise
+        if agenda.activities:
+            found.append(agenda)
+    return found
+
+
+def date_range(agenda: CourseAgenda) -> str:
+    opens = min((a.opens_at for a in agenda.activities if a.opens_at), default=None)
+    due = max((a.due_at for a in agenda.activities if a.due_at), default=None)
+    return f"del {W.fecha_corta(opens)} al {W.fecha_corta(due)}"
+
+
+def period_question(code: str, options: list[CourseAgenda]) -> tuple[str, list[list[tuple[str, str]]]]:
+    name = options[0].name or code
+    text = (f"❔ <b>{esc(name)}</b> ({code}) existe en {len(options)} periodos con fechas distintas. "
+            "¿Cuál es el tuyo? (lo ves en \"Mis Cursos Virtuales\", en el encabezado del periodo)")
+    buttons = [[(f"📅 {period_short(ag).capitalize()} · {date_range(ag)}", f"pc:{code}:{ag.period}")]
+               for ag in options]
+    return text, buttons
+
+
 def extract_courses(text: str) -> list[tuple[str, str | None]]:
     """[(código, periodo o None)] a partir de códigos sueltos y enlaces de agenda."""
     items: list[tuple[str, str | None]] = [(c, p) for p, c in LINK_RE.findall(text)]
@@ -164,7 +196,9 @@ def extract_courses(text: str) -> list[tuple[str, str | None]]:
     return out[:MAX_CODES_PER_MESSAGE]
 
 
-def add_courses(db: DB, uid: str, text: str, cache: dict[str, CourseAgenda]) -> str:
+def add_courses(db: DB, uid: str, text: str, cache: dict[str, CourseAgenda],
+                questions: list | None = None) -> str:
+    """Agrega cursos. Si un código existe en varios periodos, agrega una pregunta a `questions`."""
     user = db.user(uid)
     items = extract_courses(text)
     if not items:
@@ -179,7 +213,15 @@ def add_courses(db: DB, uid: str, text: str, cache: dict[str, CourseAgenda]) -> 
             lines.append(f"⚠️ Llegaste al máximo de {MAX_COURSES} cursos.")
             break
         try:
-            agenda = lookup(code, period, db, cache)
+            if period:
+                agenda = lookup(code, period, db, cache)
+            else:
+                options = lookup_all(code, db)
+                if len(options) > 1 and questions is not None:
+                    questions.append(period_question(code, options))
+                    lines.append(f"❔ <b>{esc(options[0].name or code)}</b>: elige tu periodo abajo 👇")
+                    continue
+                agenda = options[0] if options else None
         except (urllib.error.URLError, OSError):
             lines.append(f"⚠️ {code}: no pude consultar la página de agendas ahora. Intenta más tarde.")
             continue
@@ -187,6 +229,8 @@ def add_courses(db: DB, uid: str, text: str, cache: dict[str, CourseAgenda]) -> 
             lines.append(f"❓ {code}: no encontré su agenda. Envíame el <b>enlace de la agenda</b> "
                          "(lo ves dentro del curso, en \"Agenda\").")
             continue
+        cache[code] = agenda
+        db.learn_period(agenda.period)
         user["courses"].append({"code": code, "period": agenda.period})
         # el curso queda "conocido" para este usuario: no se avisan sus actividades como nuevas
         db.ustate(uid)["seen"] = sorted(set(db.ustate(uid)["seen"]) | {code})
@@ -244,14 +288,19 @@ def photo_file_id(msg: dict) -> str | None:
 def ocr_message(db: DB, uid: str) -> tuple[str, list[list[tuple[str, str]]]]:
     pend = db.user(uid).get("ocr_pending") or {}
     items, selected = pend.get("items", []), set(pend.get("selected", []))
-    lines = [f"📸 Encontré <b>{len(items)} curso{'s' if len(items) != 1 else ''} nuevo{'s' if len(items) != 1 else ''}</b> en tu captura.",
-             "Toca un curso para marcarlo o desmarcarlo y luego <b>Agregar seleccionados</b>."]
+    lines = [f"📸 Encontré <b>{len(items)} curso{'s' if len(items) != 1 else ''} nuevo{'s' if len(items) != 1 else ''}</b> en tu captura:"]
+    for it in items:
+        lines.append(f"• {esc(it['name'])} <i>({esc(it.get('label') or it['period'])})</i>")
+    lines.append("\n<b>Cómo funcionan los botones:</b>\n"
+                 "☑️ = se agregará · ⬜ = no se agregará (toca un curso para cambiarlo)\n"
+                 "✅ <b>Agregar seleccionados</b> guarda los marcados\n"
+                 "✖️ <b>Cancelar</b> no agrega nada")
     if pend.get("already"):
         lines.append("\nYa tenías: " + ", ".join(esc(n) for n in pend["already"]) + ".")
     if pend.get("discarded"):
         lines.append(f"<i>Descarté {pend['discarded']} número(s) que no correspondían a ningún curso.</i>")
     lines.append("<i>¿Falta alguno? Escríbeme su código.</i>")
-    buttons = [[(f"{'☑️' if it['code'] in selected else '⬜'} {it['name'][:45]}", f"tg:{it['code']}")]
+    buttons = [[(f"{'☑️' if it['code'] in selected else '⬜'} {it['name'][:40]}", f"tg:{it['code']}")]
                for it in items]
     buttons.append([(f"✅ Agregar seleccionados ({len(selected)})", "oa:"), ("✖️ Cancelar", "ox:")])
     return "\n".join(lines), buttons
@@ -260,7 +309,9 @@ def ocr_message(db: DB, uid: str) -> tuple[str, list[list[tuple[str, str]]]]:
 def process_photo(db: DB, uid: str, msg: dict, cache: dict[str, CourseAgenda]) -> None:
     send_message("📸 Leyendo tu captura… (puede tardar un minuto)", uid)
     try:
-        codes, periods = extract_codes(download_file(photo_file_id(msg)))
+        result = extract_codes(download_file(photo_file_id(msg)))
+        codes, periods = result[0], result[1]
+        hints = result[2] if len(result) > 2 else {}
     except OCRUnavailable:
         send_message("No pude leer imágenes en este momento. Envíame los códigos escritos, "
                      "por ejemplo <code>102437374 202016902</code>.", uid)
@@ -271,21 +322,33 @@ def process_photo(db: DB, uid: str, msg: dict, cache: dict[str, CourseAgenda]) -
         return
     user = db.user(uid)
     mine = {c["code"] for c in user["courses"]}
-    items, already, discarded = [], [], 0
+    items, already, discarded, ambiguous = [], [], 0, []
     for code in codes[:MAX_CODES_PER_MESSAGE]:
         if code in mine:
             already.append(db.state["course_names"].get(code) or code)
             continue
         try:
-            agenda = lookup(code, None, db, cache, extra_periods=periods)
+            if hints.get(code):   # el periodo bajo el que aparece en la captura
+                agenda = lookup(code, hints[code], db, {})
+                options = [agenda] if agenda else lookup_all(code, db, periods)
+            else:
+                options = lookup_all(code, db, periods)
         except (urllib.error.URLError, OSError):
-            agenda = None
-        if agenda:
-            items.append({"code": code, "period": agenda.period, "name": agenda.name or code})
+            options = []
+        if len(options) == 1:
+            ag = options[0]
+            items.append({"code": code, "period": ag.period, "name": ag.name or code,
+                          "label": period_short(ag)})
+        elif len(options) > 1:
+            ambiguous.append(period_question(code, options))
         else:
             discarded += 1
     tip = ("\n\n💡 Si falta algún curso: envía la captura como <b>archivo</b> (📎 → Archivo) para "
            "que llegue sin comprimir, o escríbeme su código (el número del recuadro azul).")
+    for q_text, q_buttons in ambiguous:
+        send_message(q_text, uid, buttons=q_buttons)
+    if not items and ambiguous:
+        return
     if not items:
         if already:
             names = ", ".join(esc(n) for n in already)
@@ -575,7 +638,10 @@ def handle_message(db: DB, msg: dict, cache: dict, admin_code: str) -> bool:
                      "\"Mis Cursos Virtuales\"). Puedes mandar varios en un mensaje.", uid)
     elif cmd == "agregar" or (not cmd and extract_courses(text)):
         send_message("🔎 Buscando tus agendas…", uid)
-        send_message(add_courses(db, uid, args if cmd else text, cache), uid)
+        questions: list = []
+        send_message(add_courses(db, uid, args if cmd else text, cache, questions), uid)
+        for q_text, q_buttons in questions:
+            send_message(q_text, uid, buttons=q_buttons)
     else:
         send_message("No te entendí 🤔 Envíame códigos de curso o usa /ayuda.", uid)
     return False
@@ -649,6 +715,17 @@ def handle_callback(db: DB, cq: dict) -> None:
         edit_message(chat_id, message_id, f"📸 Agregando {len(chosen)} curso(s) de tu captura…")
         links = " ".join(f"agendas/{it['period']}/{it['code']}.htm" for it in chosen)
         send_message(add_courses(db, uid, links, {}), uid)
+        return
+
+    if action == "pc":
+        user = db.user(uid)
+        code, _, period = target.partition(":")
+        if not user or user["status"] != "approved" or not code.isdigit() or not period:
+            safe_answer(cq["id"], "No autorizado")
+            return
+        safe_answer(cq["id"], "Agregando…")
+        edit_message(chat_id, message_id, f"📅 Elegiste el periodo {esc(period)} para {esc(code)}.")
+        send_message(add_courses(db, uid, f"agendas/{period}/{code}.htm", {}), uid)
         return
 
     if action == "rm":

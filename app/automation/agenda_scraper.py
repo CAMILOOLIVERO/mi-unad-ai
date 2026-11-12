@@ -281,12 +281,14 @@ def nice_case(text: str) -> str:
     return " ".join(out)
 
 
-TITLE_RE = re.compile(r"^\s*Agenda\s*-\s*(\d+)\s*-\s*(.+?)\s*-\s*(\d{4}\b.*)$", re.I | re.S)
+# Ej.: "Agenda - 212064 - INFERENCIA ESTADÍSTICA - 2026 II PERIODO 16-04 (2204)"
+# (algunas páginas anteponen texto, p. ej. "Idioma de la oferta es :: Agenda - …")
+TITLE_RE = re.compile(r"Agenda\s*-\s*(\d+)\s*-\s*(.+?)\s*-\s*(\d{4}\b.*)$", re.I | re.S)
 
 
 def extract_course_info(page_title: str, tables: list, code: str) -> tuple[str | None, str | None]:
     """Nombre del curso y etiqueta del periodo. 1) <title>  2) encabezado 'NOMBRE - Curso ...'."""
-    m = TITLE_RE.match(page_title or "")
+    m = TITLE_RE.search(page_title or "")
     if m and m.group(2).strip():
         return nice_case(m.group(2)), " ".join(m.group(3).split())
     header_re = re.compile(rf"^(.+?)\s*-\s*Curso\b.*\b{re.escape(code)}\b", re.I)

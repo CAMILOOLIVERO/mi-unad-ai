@@ -29,6 +29,11 @@ class NombreCursoTest(unittest.TestCase):
         self.assertEqual(ag.name, "Gestión de Proyectos Sostenibles")
         self.assertEqual(ag.period_label, "2026 II PERIODO 16-05 (2205)")
 
+    def test_titulo_con_texto_antes(self):
+        html = page("Idioma de la oferta es :: Agenda - 212064 - INFERENCIA ESTADÍSTICA - 2026 II PERIODO 16-05 (2205)",
+                    rows=[ROW.format(name="Fase 1", o="13/OCT/2026", d="26/OCT/2026")])
+        self.assertEqual(S.parse_agenda(html, "212064").name, "Inferencia Estadística")
+
     def test_numeral_romano_y_palabras_menores(self):
         self.assertEqual(S.nice_case("GESTIÓN INTEGRAL DE PROYECTOS I"), "Gestión Integral de Proyectos I")
         self.assertEqual(S.nice_case("ADMINISTRACIÓN DE BASES DE DATOS"), "Administración de Bases de Datos")
