@@ -7,3 +7,5 @@ artifacts/
 state/
 logs/
 _archivo/
+data_local/
+data_repo/

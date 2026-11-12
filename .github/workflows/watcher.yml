@@ -9,10 +9,10 @@ on:
   workflow_dispatch:   # botón "Run workflow" para ejecutarlo a mano
 
 permissions:
-  contents: write      # necesario para guardar state/notify_state.json en el repositorio
+  contents: read       # este repositorio público ya no guarda datos: todo va al repo privado
 
 concurrency:
-  group: mi-unad-watcher   # nunca dos revisiones al mismo tiempo
+  group: mi-unad-watcher   # nunca dos revisiones al mismo tiempo (evita choques en los datos)
   cancel-in-progress: false
 
 jobs:
@@ -26,22 +26,39 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Pruebas (si fallan, el bot no corre)
+        run: python -m unittest discover tests -q
+
+      - name: Traer la base de datos privada
+        env:
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+        run: |
+          AUTH=$(printf 'x-access-token:%s' "$DATA_REPO_TOKEN" | base64 -w0)
+          echo "::add-mask::$AUTH"
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH" clone -q --depth 1 \
+            "https://github.com/${{ github.repository_owner }}/mi-unad-ai-data.git" data_repo
+
       - name: Revisar agendas y avisar por Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_ADMIN_CODE: ${{ secrets.TELEGRAM_ADMIN_CODE }}
+          DATA_DIR: data_repo/data
         run: python -m app.watcher
 
-      - name: Guardar memoria de avisos enviados
+      - name: Guardar la base de datos privada
         if: always()   # también si hubo error, para no repetir lo que sí se envió
+        env:
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
         run: |
-          if [ -f state/notify_state.json ]; then
-            git config user.name "mi-unad-bot"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -f state/notify_state.json
-            if ! git diff --cached --quiet; then
-              git commit -m "estado de avisos [skip ci]"
-              git pull --rebase --autostash
-              git push
-            fi
+          [ -d data_repo/data ] || exit 0
+          cd data_repo
+          git config user.name "mi-unad-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          if ! git diff --cached --quiet; then
+            git commit -q -m "datos del bot"
+            AUTH=$(printf 'x-access-token:%s' "$DATA_REPO_TOKEN" | base64 -w0)
+            echo "::add-mask::$AUTH"
+            git -c http.extraheader="AUTHORIZATION: basic $AUTH" pull -q --rebase --autostash
+            git -c http.extraheader="AUTHORIZATION: basic $AUTH" push -q
           fi

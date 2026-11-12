@@ -217,6 +217,8 @@ def evaluate(courses: list[dict], agendas: dict[str, CourseAgenda], failed: list
     for code, agenda in agendas.items():
         curso = names.get(code) or code
         first_time = code not in state["courses_seen"]
+        # sin foto previa de este curso no se puede saber qué es nuevo: no se avisa como "nueva"
+        has_snapshot = any(v.get("course") == code for v in state["activities"].values())
         current_ids = {a.external_id for a in agenda.activities}
 
         if first_time:
@@ -234,7 +236,7 @@ def evaluate(courses: list[dict], agendas: dict[str, CourseAgenda], failed: list
             vals = activity_values(a, curso, agenda.url, now)
             prev = state["activities"].get(a.external_id)
 
-            if prev is None and not first_time:
+            if prev is None and not first_time and has_snapshot:
                 add(f"new:{a.external_id}", render("nueva", **vals))
             elif prev and prev.get("due_at") != a.due_at:
                 add(f"change:{a.external_id}:{a.due_at}",
@@ -432,8 +434,10 @@ def in_quiet_hours(now: datetime) -> bool:
 
 # ================================================================ ejecución
 
-def collect() -> tuple[list[dict], dict[str, CourseAgenda], list[str]]:
-    courses = load_config()
+def collect(courses: list[dict] | None = None
+            ) -> tuple[list[dict], dict[str, CourseAgenda], list[str]]:
+    """Descarga y lee las agendas. Cada curso se descarga una sola vez aunque lo tengan varios."""
+    courses = courses if courses is not None else load_config()
     agendas: dict[str, CourseAgenda] = {}
     failed: list[str] = []
     for c in courses:
@@ -525,6 +529,8 @@ def main() -> int:
     ap.add_argument("--resumen", action="store_true",
                     help="Enviar ya al grupo las actividades en curso y próximos cierres")
     ap.add_argument("--loop", type=int, metavar="MIN", help="Repetir cada MIN minutos")
+    ap.add_argument("--multi", action="store_true",
+                    help="Modo multiusuario (automático si existe la variable DATA_DIR)")
     args = ap.parse_args()
 
     try:
@@ -571,6 +577,10 @@ def main() -> int:
     except TelegramError as exc:
         log.error("%s", exc)
         return 1
+
+    if args.multi or os.environ.get("DATA_DIR"):
+        from app.multi import run_multi
+        return run_multi(args.dry_run)
 
     try:
         if not args.loop:

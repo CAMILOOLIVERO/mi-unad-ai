@@ -70,11 +70,32 @@ def _chunks(text: str) -> list[str]:
     return parts
 
 
-def send_message(text: str, chat_id: str | None = None) -> None:
+def send_message(text: str, chat_id: str | int | None = None,
+                 buttons: list[list[tuple[str, str]]] | None = None) -> None:
+    """Envía un mensaje. buttons: filas de (texto, callback_data) que van en el último trozo."""
     chat = chat_id or _env("TELEGRAM_CHAT_ID")
-    for part in _chunks(text):
-        _call("sendMessage", {"chat_id": chat, "text": part, "parse_mode": "HTML",
-                              "disable_web_page_preview": True})
+    parts = _chunks(text)
+    for i, part in enumerate(parts):
+        payload = {"chat_id": chat, "text": part, "parse_mode": "HTML",
+                   "disable_web_page_preview": True}
+        if buttons and i == len(parts) - 1:
+            payload["reply_markup"] = {"inline_keyboard": [
+                [{"text": t, "callback_data": d} for t, d in row] for row in buttons]}
+        _call("sendMessage", payload)
+
+
+def answer_callback(callback_id: str, text: str | None = None) -> None:
+    """Confirma la pulsación de un botón (quita el 'cargando' en Telegram)."""
+    payload = {"callback_query_id": callback_id}
+    if text:
+        payload["text"] = text
+    _call("answerCallbackQuery", payload)
+
+
+def edit_message(chat_id: str | int, message_id: int, text: str) -> None:
+    """Reemplaza el texto de un mensaje y le quita los botones."""
+    _call("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text,
+                              "parse_mode": "HTML", "disable_web_page_preview": True})
 
 
 def get_me() -> dict:
@@ -96,7 +117,7 @@ def find_chats() -> list[dict]:
 
 def get_updates(offset: int | None = None) -> list[dict]:
     """Mensajes nuevos recibidos por el bot (sin esperar)."""
-    payload = {"timeout": 0, "allowed_updates": ["message"]}
+    payload = {"timeout": 0, "allowed_updates": ["message", "callback_query"]}
     if offset is not None:
         payload["offset"] = offset
     return _call("getUpdates", payload) or []

@@ -21,16 +21,26 @@ Corre solo cada 30 minutos en GitHub Actions.
 Silencio de 10 p. m. a 6 a. m. Varios avisos del mismo tipo llegan en un solo mensaje.
 "Cerrada" solo significa que pasó la fecha: **nunca** se asume que fue entregada.
 
-En el grupo, `/encurso` responde con lo abierto y lo que cierra pronto (en la siguiente revisión).
+## Varios usuarios (chat privado)
 
-## Configuración
+Cada estudiante habla con el bot **en privado**:
 
-- `courses.json`: periodo y códigos de los cursos. El nombre se lee de la agenda.
-  ```json
-  { "periodos": { "2026-2205": ["102437374"], "2026-2204": ["202016902"] } }
-  ```
-- `app/notify/mensajes.py`: textos, días de la cuenta regresiva, horarios y silencio.
-- Secretos (nunca en el código): `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID`.
+1. Envía `/start`. El administrador recibe la solicitud y la aprueba con un botón.
+2. Agrega sus cursos enviando los **códigos** del Campus (el número del recuadro azul en
+   "Mis Cursos Virtuales"), por ejemplo `102437374 202016902`, o el enlace de la agenda.
+3. Recibe **solo** los avisos de sus cursos. Las agendas compartidas se descargan una vez.
+
+Comandos: `/encurso`, `/miscursos` (con botón para quitar), `/quitar <código>`, `/ayuda`.
+
+## Datos
+
+Los datos personales (usuarios, cursos, entregas, memoria de avisos) **no están en este
+repositorio público**: viven en un repositorio **privado** que el bot lee y escribe en cada
+revisión con un token limitado a ese repositorio. Los registros públicos no muestran nombres,
+ids ni cursos.
+
+Secretos del repositorio: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CODE` (código con el que el
+administrador reclama el bot: `/start <código>`) y `DATA_REPO_TOKEN`.
 
 ## Comandos (PowerShell, desde esta carpeta)
 
@@ -46,12 +56,7 @@ py -m app.watcher --chats                # ver el id del grupo
 py -m app.watcher --test                 # mensaje de prueba
 ```
 
-## Estado
-
-`state/notify_state.json` es la memoria del bot (qué avisos ya envió y la última fecha
-vista de cada actividad). GitHub Actions lo guarda en el repositorio después de cada revisión.
-Si se borra, el bot vuelve a enviar la bienvenida.
-
 ## Cada semestre
 
-Actualiza `courses.json` con el nuevo periodo y los códigos de los cursos.
+Cada usuario agrega sus cursos nuevos desde Telegram. Si el periodo es nuevo, basta con
+enviar una vez el enlace de una agenda de ese periodo: el bot lo aprende para todos.
