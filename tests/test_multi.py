@@ -188,13 +188,55 @@ class MultiTest(Base):
         self.run_bot(datetime(2026, 11, 20, 7, 7, tzinfo=BOGOTA))  # Fase 2 cierra mañana
         self.assertFalse(any("Introducción al estándar P5" in t for t in self.tg.to(CAMILO)))
 
-    def test_quitar_curso_con_boton(self):
+    def test_quitar_varios_cursos_con_confirmacion(self):
+        self.tg.msg(CAMILO, f"/start {ADMIN_CODE}")
+        self.tg.msg(CAMILO, "/miscursos")
+        self.run_bot()
+        text, buttons = [(t, b) for c, t, b in self.tg.sent if c == CAMILO and "Tus cursos" in t][-1]
+        self.assertEqual(len(buttons), 6 + 2)                      # 6 cursos + 2 filas de acciones
+        self.assertTrue(buttons[0][0][0].startswith("⬜"))
+        edits = []
+        with mock.patch.object(MU, "edit_message", lambda c, m, t, b=None: edits.append((t, b))):
+            self.tg.press(CAMILO, "rs:212064")
+            self.tg.press(CAMILO, "rs:202016907")
+            self.run_bot()
+            self.assertIn("Quitar seleccionados (2)", edits[-1][1][-2][0][0])
+            self.tg.press(CAMILO, "rq:")                           # pide confirmación
+            self.run_bot()
+            self.assertIn("¿Quitar estos 2 cursos?", edits[-1][0])
+            self.assertEqual(len(self.db().user(CAMILO)["courses"]), 6)   # aún no borra
+            self.tg.press(CAMILO, "ry:")
+            self.run_bot()
+        codes = {c["code"] for c in self.db().user(CAMILO)["courses"]}
+        self.assertEqual(len(codes), 4)
+        self.assertNotIn("212064", codes)
+        self.assertNotIn("202016907", codes)
+        self.assertIn("Quité 2 cursos", edits[-1][0])
+
+    def test_seleccionar_todos_y_cerrar_sin_quitar(self):
+        self.tg.msg(CAMILO, f"/start {ADMIN_CODE}")
+        self.tg.msg(CAMILO, "/miscursos")
+        self.run_bot()
+        edits = []
+        with mock.patch.object(MU, "edit_message", lambda c, m, t, b=None: edits.append((t, b))):
+            self.tg.press(CAMILO, "ra:")
+            self.run_bot()
+            self.assertIn("Quitar seleccionados (6)", edits[-1][1][-2][0][0])
+            self.tg.press(CAMILO, "rx:")
+            self.run_bot()
+        self.assertEqual(len(self.db().user(CAMILO)["courses"]), 6)
+        self.assertIn("no quité ningún curso", edits[-1][0])
+        # la lista vieja ya no hace nada
+        self.tg.press(CAMILO, "ry:")
+        self.run_bot()
+        self.assertEqual(len(self.db().user(CAMILO)["courses"]), 6)
+
+    def test_quitar_curso_con_boton_antiguo(self):
         self.tg.msg(CAMILO, f"/start {ADMIN_CODE}")
         self.run_bot()
         self.tg.press(CAMILO, "rm:212064")
         self.run_bot()
         self.assertNotIn("212064", {c["code"] for c in self.db().user(CAMILO)["courses"]})
-        self.assertTrue(any("Quité <b>" in t for t in self.tg.to(CAMILO)))
 
     def test_enlace_ensena_periodo_nuevo(self):
         self.tg.msg(CAMILO, f"/start {ADMIN_CODE}")

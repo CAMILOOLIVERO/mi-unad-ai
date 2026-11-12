@@ -45,7 +45,7 @@ COMMANDS = [("encurso", "Lo abierto y lo que cierra pronto"),
             ("pendientes", "Lo abierto que te falta entregar"),
             ("entregadas", "Lo que ya marcaste como entregado"),
             ("agregar", "Agregar cursos con su código"),
-            ("miscursos", "Ver y quitar tus cursos"),
+            ("miscursos", "Ver tus cursos y quitar uno, varios o todos"),
             ("ayuda", "Cómo usar el bot")]
 
 AYUDA = (
@@ -59,7 +59,7 @@ AYUDA = (
     "/encurso — lo abierto y lo que cierra pronto\n"
     "/pendientes — lo abierto que te falta entregar (con botón ✅ para marcarlo)\n"
     "/entregadas — lo que ya marcaste (con botón ↩️ para deshacer)\n"
-    "/miscursos — tus cursos (con botón para quitar)\n"
+    "/miscursos — tus cursos (puedes quitar uno, varios o todos)\n"
     "/quitar 102437374 — quitar un curso\n"
     "/ayuda — este mensaje\n\n"
     "Avisos automáticos: cuando abre una actividad, cuenta regresiva de 7, 5, 4, 3, 2 y 1 días, "
@@ -261,16 +261,31 @@ def remove_course(db: DB, uid: str, code: str) -> str:
 
 
 def my_courses(db: DB, uid: str) -> tuple[str, list[list[tuple[str, str]]]]:
-    courses = db.user(uid)["courses"]
+    """/miscursos: lista de cursos con selección múltiple para quitar."""
+    user = db.user(uid)
+    courses = user["courses"]
     if not courses:
+        user.pop("rm_pending", None)
         return ("Aún no tienes cursos. Envíame sus códigos (el número del recuadro azul en "
-                "\"Mis Cursos Virtuales\").", [])
-    lines = ["📚 <b>Tus cursos</b>"]
-    buttons = []
+                "\"Mis Cursos Virtuales\") o una captura de esa pantalla.", [])
+    pend = user.setdefault("rm_pending", {"selected": []})
+    codes = [c["code"] for c in courses]
+    pend["selected"] = [c for c in pend["selected"] if c in codes]
+    selected = set(pend["selected"])
+    lines = [f"📚 <b>Tus cursos ({len(courses)})</b>"]
     for c in courses:
         name = db.state["course_names"].get(c["code"]) or c["code"]
         lines.append(f"• {esc(name)} <code>{c['code']}</code>")
-        buttons.append([(f"🗑 Quitar {name[:40]}", f"rm:{c['code']}")])
+    lines.append("\n<b>Para quitar cursos:</b> toca los que quieras (☑️ = se quitará) y luego "
+                 "<b>Quitar seleccionados</b>. Te pediré confirmar antes de borrar.")
+    buttons = []
+    for c in courses:
+        name = db.state["course_names"].get(c["code"]) or c["code"]
+        mark = "☑️" if c["code"] in selected else "⬜"
+        buttons.append([(f"{mark} {name[:40]}", f"rs:{c['code']}")])
+    all_on = len(selected) == len(codes)
+    buttons.append([(f"🗑 Quitar seleccionados ({len(selected)})", "rq:")])
+    buttons.append([("⬜ Ninguno" if all_on else "☑️ Todos", "ra:"), ("✖️ Cerrar", "rx:")])
     return "\n".join(lines), buttons
 
 
@@ -728,6 +743,53 @@ def handle_callback(db: DB, cq: dict) -> None:
         send_message(add_courses(db, uid, f"agendas/{period}/{code}.htm", {}), uid)
         return
 
+    if action in ("rs", "ra", "rq", "ry", "rb", "rx"):
+        user = db.user(uid)
+        pend = (user or {}).get("rm_pending")
+        if not user or user["status"] != "approved" or pend is None:
+            safe_answer(cq["id"], "Esa lista ya no está activa. Usa /miscursos")
+            return
+        codes = [c["code"] for c in user["courses"]]
+        if action == "rs" and target in codes:
+            sel = set(pend["selected"]) ^ {target}
+            pend["selected"] = [c for c in codes if c in sel]
+        elif action == "ra":
+            pend["selected"] = [] if set(pend["selected"]) == set(codes) else list(codes)
+        elif action == "rq":
+            if not pend["selected"]:
+                safe_answer(cq["id"], "No seleccionaste ningún curso")
+                return
+            names = [db.state["course_names"].get(c) or c for c in pend["selected"]]
+            n = len(names)
+            safe_answer(cq["id"])
+            edit_message(chat_id, message_id,
+                         f"⚠️ ¿Quitar {'este curso' if n == 1 else f'estos {n} cursos'}?\n"
+                         + "\n".join(f"• {esc(x)}" for x in names)
+                         + "\n\nDejarás de recibir sus avisos. Puedes volver a agregarlos cuando quieras.",
+                         [[("✅ Sí, quitar", "ry:"), ("↩️ Volver", "rb:")]])
+            return
+        elif action == "ry":
+            removed = [db.state["course_names"].get(c) or c for c in pend["selected"]]
+            for code in list(pend["selected"]):
+                remove_course(db, uid, code)
+            user.pop("rm_pending", None)
+            safe_answer(cq["id"], "Cursos quitados" if removed else None)
+            left = len(user["courses"])
+            edit_message(chat_id, message_id,
+                         f"🗑 Quité {len(removed)} curso{'s' if len(removed) != 1 else ''}:\n"
+                         + "\n".join(f"• {esc(x)}" for x in removed)
+                         + f"\n\nTe quedan {left} curso{'s' if left != 1 else ''}. Usa /miscursos para verlos.")
+            return
+        elif action == "rx":
+            user.pop("rm_pending", None)
+            safe_answer(cq["id"])
+            edit_message(chat_id, message_id, "👍 Listo, no quité ningún curso.")
+            return
+        safe_answer(cq["id"])
+        text_, buttons = my_courses(db, uid)       # rs, ra y rb: volver a dibujar la lista
+        edit_message(chat_id, message_id, text_, buttons or None)
+        return
+
     if action == "rm":
         user = db.user(uid)
         if not user or user["status"] != "approved":
@@ -840,9 +902,9 @@ def run_multi(dry_run: bool = False) -> int:
     if not dry_run:
         # cada paso por separado: si uno falla, los demás siguen
         try:
-            if not db.state.get("commands_v4"):
+            if not db.state.get("commands_v5"):
                 set_commands(COMMANDS)
-                db.state["commands_v4"] = True
+                db.state["commands_v5"] = True
         except TelegramError as exc:
             log.error("No se pudo registrar el menú de comandos: %s", exc)
         try:
