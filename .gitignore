@@ -1,0 +1,9 @@
+.venv/
+browser_profile/
+.env
+__pycache__/
+*.pyc
+artifacts/
+state/
+logs/
+_archivo/

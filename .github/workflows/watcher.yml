@@ -1,0 +1,47 @@
+# Mi UNAD AI - revisión automática en los servidores de GitHub (no requiere tu PC encendido)
+name: Mi UNAD AI
+
+on:
+  schedule:
+    # Cada 30 minutos (en los minutos 7 y 37 para evitar la congestión del minuto 0).
+    # El cron de GitHub va en hora UTC; el horario de silencio lo maneja el código en hora Colombia.
+    - cron: "7,37 * * * *"
+  workflow_dispatch:   # botón "Run workflow" para ejecutarlo a mano
+
+permissions:
+  contents: write      # necesario para guardar state/notify_state.json en el repositorio
+
+concurrency:
+  group: mi-unad-watcher   # nunca dos revisiones al mismo tiempo
+  cancel-in-progress: false
+
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Revisar agendas y avisar por Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m app.watcher
+
+      - name: Guardar memoria de avisos enviados
+        if: always()   # también si hubo error, para no repetir lo que sí se envió
+        run: |
+          if [ -f state/notify_state.json ]; then
+            git config user.name "mi-unad-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -f state/notify_state.json
+            if ! git diff --cached --quiet; then
+              git commit -m "estado de avisos [skip ci]"
+              git pull --rebase --autostash
+              git push
+            fi
+          fi
