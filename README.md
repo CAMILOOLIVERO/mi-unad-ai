@@ -30,7 +30,18 @@ Cada estudiante habla con el bot **en privado**:
    "Mis Cursos Virtuales"), por ejemplo `102437374 202016902`, o el enlace de la agenda.
 3. Recibe **solo** los avisos de sus cursos. Las agendas compartidas se descargan una vez.
 
-Comandos: `/encurso`, `/miscursos` (con botón para quitar), `/quitar <código>`, `/ayuda`.
+Comandos: `/encurso`, `/pendientes`, `/miscursos` (con botón para quitar), `/quitar <código>`, `/ayuda`.
+
+Cada recordatorio trae el botón **✅ Ya la entregué**: al tocarlo, el bot deja de recordar esa
+actividad solo a esa persona (con opción de deshacer). Nunca se asume entregada por la fecha.
+
+## Respuesta inmediata (opcional)
+
+`cloudflare/worker.js` es un receptor gratuito en Cloudflare Workers. Telegram le envía cada
+mensaje al instante; él lo guarda en la cola del repositorio privado (`data/queue/`) y despierta
+al bot en GitHub, que atiende toda la cola (~1 minuto). Se activa al crear los secretos
+`TELEGRAM_WEBHOOK_URL` (URL del Worker) y `TELEGRAM_WEBHOOK_SECRET`. Sin ellos, el bot revisa
+los mensajes cada 30 minutos.
 
 ## Datos
 

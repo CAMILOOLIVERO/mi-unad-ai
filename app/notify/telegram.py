@@ -145,3 +145,9 @@ def get_updates(offset: int | None = None) -> list[dict]:
 def set_commands(commands: list[tuple[str, str]]) -> None:
     """Registra los comandos para que aparezcan en el menú '/' de Telegram."""
     _call("setMyCommands", {"commands": [{"command": c, "description": d} for c, d in commands]})
+
+
+def set_webhook(url: str, secret: str) -> None:
+    """Telegram enviará cada mensaje al instante a esta URL (el receptor de Cloudflare)."""
+    _call("setWebhook", {"url": url, "secret_token": secret,
+                         "allowed_updates": ["message", "callback_query"]})

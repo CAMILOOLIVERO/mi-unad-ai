@@ -16,6 +16,7 @@ Los registros (logs) NUNCA incluyen nombres, ids ni cursos: en un repositorio p�
 from __future__ import annotations
 
 import copy
+import hashlib
 import html
 import json
 import logging
@@ -29,7 +30,7 @@ from pathlib import Path
 from app import watcher as W
 from app.automation.agenda_scraper import BOGOTA, URL_TEMPLATE, CourseAgenda, fetch, parse_agenda
 from app.notify.telegram import (TelegramError, answer_callback, edit_message, get_updates,
-                                 send_message, set_commands)
+                                 send_message, set_commands, set_webhook)
 
 log = logging.getLogger("multi")
 
@@ -40,6 +41,7 @@ LINK_RE = re.compile(r"agendas/(\d{4}-\d{3,5})/(\d{5,10})\.htm", re.I)
 CODE_RE = re.compile(r"(?<![\d/.-])\d{5,10}(?!\d)")
 
 COMMANDS = [("encurso", "Lo abierto y lo que cierra pronto"),
+            ("pendientes", "Lo que te falta entregar"),
             ("agregar", "Agregar cursos con su código"),
             ("miscursos", "Ver y quitar tus cursos"),
             ("ayuda", "Cómo usar el bot")]
@@ -52,11 +54,13 @@ AYUDA = (
     "<code>102437374 202016902</code>\n"
     "También sirve el enlace de la agenda del curso.\n\n"
     "/encurso — lo abierto y lo que cierra pronto\n"
+    "/pendientes — lo que te falta entregar (con botón ✅ Ya la entregué)\n"
     "/miscursos — tus cursos (con botón para quitar)\n"
     "/quitar 102437374 — quitar un curso\n"
     "/ayuda — este mensaje\n\n"
     "Avisos automáticos: cuando abre una actividad, cuenta regresiva de 7, 5, 4, 3, 2 y 1 días, "
-    "y últimas horas antes del cierre."
+    "y últimas horas antes del cierre. Cuando entregues, toca <b>✅ Ya la entregué</b> y dejo "
+    "de recordarte esa actividad."
 )
 
 
@@ -217,6 +221,84 @@ def my_courses(db: DB, uid: str) -> tuple[str, list[list[tuple[str, str]]]]:
     return "\n".join(lines), buttons
 
 
+# ================================================================ entregas
+
+def short_id(ext_id: str) -> str:
+    """Id corto para los botones (Telegram limita callback_data a 64 bytes)."""
+    return hashlib.sha1(ext_id.encode("utf-8")).hexdigest()[:10]
+
+
+def user_codes(db: DB, uid: str) -> set[str]:
+    return {c["code"] for c in db.user(uid)["courses"]}
+
+
+def find_activity(db: DB, uid: str, sid: str) -> str | None:
+    codes = user_codes(db, uid)
+    return next((ext for ext, v in db.state["activities"].items()
+                 if v.get("course") in codes and short_id(ext) == sid), None)
+
+
+def activity_label(db: DB, ext_id: str) -> tuple[str, str]:
+    snap = db.state["activities"].get(ext_id, {})
+    return snap.get("title") or ext_id, db.state["course_names"].get(snap.get("course")) or ""
+
+
+def delivery_buttons(db: DB, keys: tuple[str, ...]) -> list[list[tuple[str, str]]]:
+    """Un botón ✅ por cada actividad de un recordatorio o aviso de apertura."""
+    ext_ids = []
+    for key in keys:
+        kind, _, rest = key.partition(":")
+        if kind == "due":
+            ext = rest.rsplit(":", 1)[0]
+        elif kind == "open":
+            ext = rest
+        else:
+            continue
+        if ext not in ext_ids:
+            ext_ids.append(ext)
+    if len(ext_ids) == 1:
+        return [[("✅ Ya la entregué", f"dl:{short_id(ext_ids[0])}")]]
+    rows = []
+    for ext in ext_ids[:10]:
+        title, course = activity_label(db, ext)
+        fase = title.split(" - ")[0] if " - " in title else title[:20]
+        rows.append([(f"✅ Entregué {fase} · {course[:22]}", f"dl:{short_id(ext)}")])
+    return rows
+
+
+def pending_list(db: DB, uid: str, now: datetime) -> tuple[str, list[list[tuple[str, str]]]]:
+    user = db.user(uid)
+    codes, delivered = user_codes(db, uid), set(user.get("delivered", {}))
+    items = []
+    for ext, v in db.state["activities"].items():
+        due = W.to_dt(v.get("due_at"))
+        if v.get("course") in codes and ext not in delivered and due and due > now:
+            items.append((due, ext, v))
+    if not items:
+        return "🎉 No tienes entregas pendientes en tus cursos.", []
+    items.sort(key=lambda x: x[0])
+    lines, buttons = ["📝 <b>Te falta entregar</b>"], []
+    for due, ext, v in items[:15]:
+        opens = W.to_dt(v.get("opens_at"))
+        estado = "🔜 abre " + W.fecha_corta(v.get("opens_at")) if opens and opens > now else                  f"🗓 cierra {W.fecha_corta(v.get('due_at'))} · faltan {W.tiempo_corto(due, now)}"
+        lines.append(f"\n📚 <b>{esc(db.state['course_names'].get(v['course']) or v['course'])}</b>\n"
+                     f"      ▸ {esc(v.get('title'))}\n      {estado}")
+        fase = (v.get("title") or "").split(" - ")[0][:20]
+        course = (db.state["course_names"].get(v["course"]) or "")[:22]
+        buttons.append([(f"✅ Entregué {fase} · {course}", f"dl:{short_id(ext)}")])
+    if len(items) > 15:
+        lines.append(f"\n… y {len(items) - 15} más.")
+    return "\n".join(lines), buttons
+
+
+def safe_answer(callback_id: str, text: str | None = None) -> None:
+    """El receptor de Cloudflare ya pudo haber respondido el botón: ignorar ese error."""
+    try:
+        answer_callback(callback_id, text)
+    except TelegramError:
+        pass
+
+
 # ================================================================ migración del bot de un solo usuario
 
 def migrate_legacy(db: DB, uid: str) -> int:
@@ -247,15 +329,40 @@ def migrate_legacy(db: DB, uid: str) -> int:
 
 # ================================================================ mensajes y botones recibidos
 
+def read_queue(db: DB) -> list[dict]:
+    """Mensajes que el receptor de Cloudflare guardó en data/queue/ (modo inmediato)."""
+    qdir = db.root / "queue"
+    if not qdir.is_dir():
+        return []
+    updates = []
+    for f in sorted(qdir.glob("*.json"), key=lambda p: int(p.stem) if p.stem.isdigit() else 0):
+        try:
+            updates.append(json.loads(f.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError):
+            log.warning("Mensaje en cola ilegible; se descarta")
+        f.unlink()  # atendido (o ilegible): se borra de la cola
+    return updates
+
+
 def process_updates(db: DB, cache: dict[str, CourseAgenda], admin_code: str) -> set[str]:
     """Atiende todo lo pendiente en Telegram. Devuelve los usuarios que pidieron /encurso."""
-    offset = db.state.get("tg_offset")
-    updates = get_updates(offset + 1 if offset is not None else None)
-    if not updates:
+    updates = read_queue(db)
+    # con receptor (webhook) Telegram ya no permite pedir mensajes: solo se lee la cola
+    if not os.environ.get("TELEGRAM_WEBHOOK_URL", "").strip():
+        offset = db.state.get("tg_offset")
+        updates += get_updates(offset + 1 if offset is not None else None)
+    last = db.state.get("tg_offset") or 0
+    fresh, seen_ids = [], set()
+    for u in sorted(updates, key=lambda u: u.get("update_id", 0)):
+        uid_ = u.get("update_id", 0)
+        if uid_ > last and uid_ not in seen_ids:  # Telegram puede reenviar: se atiende una vez
+            seen_ids.add(uid_)
+            fresh.append(u)
+    if not fresh:
         return set()
-    db.state["tg_offset"] = max(u["update_id"] for u in updates)
+    db.state["tg_offset"] = max(seen_ids)
     wants: set[str] = set()
-    for upd in updates:
+    for upd in fresh:
         try:
             if "callback_query" in upd:
                 handle_callback(db, upd["callback_query"])
@@ -264,8 +371,18 @@ def process_updates(db: DB, cache: dict[str, CourseAgenda], admin_code: str) -> 
                     wants.add(str(upd["message"]["chat"]["id"]))
         except TelegramError as exc:
             log.error("Telegram al responder: %s", exc)
-    log.info("Atendidos %d mensajes/botones", len(updates))
+    log.info("Atendidos %d mensajes/botones", len(fresh))
     return wants
+
+
+def ensure_webhook(db: DB) -> None:
+    """Activa el modo inmediato cuando existen la URL del receptor y su clave."""
+    url = os.environ.get("TELEGRAM_WEBHOOK_URL", "").strip()
+    secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip()
+    if url and secret and db.state.get("webhook") != url:
+        set_webhook(url, secret)
+        db.state["webhook"] = url
+        log.info("Modo inmediato activado")
 
 
 def handle_message(db: DB, msg: dict, cache: dict, admin_code: str) -> bool:
@@ -316,6 +433,9 @@ def handle_message(db: DB, msg: dict, cache: dict, admin_code: str) -> bool:
         return True
     if cmd in ("ayuda", "help"):
         send_message(AYUDA, uid)
+    elif cmd == "pendientes":
+        text_, buttons = pending_list(db, uid, datetime.now(BOGOTA))
+        send_message(text_, uid, buttons=buttons or None)
     elif cmd == "miscursos":
         text_, buttons = my_courses(db, uid)
         send_message(text_, uid, buttons=buttons or None)
@@ -343,7 +463,7 @@ def handle_callback(db: DB, cq: dict) -> None:
 
     if action in ("ap", "rj"):
         if uid != db.admin_id() or not db.user(target):
-            answer_callback(cq["id"], "No autorizado")
+            safe_answer(cq["id"], "No autorizado")
             return
         user = db.user(target)
         user["status"] = "approved" if action == "ap" else "rejected"
@@ -354,21 +474,40 @@ def handle_callback(db: DB, cq: dict) -> None:
         else:
             edit_message(chat_id, message_id, f"❌ Rechazaste a <b>{who}</b>.")
             send_message("Lo siento, tu solicitud no fue aprobada.", target)
-        answer_callback(cq["id"])
+        safe_answer(cq["id"])
+        return
+
+    if action in ("dl", "ud"):
+        user = db.user(uid)
+        ext = find_activity(db, uid, target) if user and user["status"] == "approved" else None
+        if not ext:
+            safe_answer(cq["id"], "No encontré esa actividad")
+            return
+        title, course = activity_label(db, ext)
+        if action == "dl":
+            user.setdefault("delivered", {})[ext] = datetime.now(BOGOTA).isoformat(timespec="seconds")
+            safe_answer(cq["id"], "✅ Marcada como entregada")
+            send_message(f"✅ Marcaste <b>{esc(title)}</b> ({esc(course)}) como entregada.\n"
+                         "Ya no te recordaré esa actividad.", uid,
+                         buttons=[[("↩️ Deshacer", f"ud:{target}")]])
+        else:
+            user.get("delivered", {}).pop(ext, None)
+            safe_answer(cq["id"], "↩️ Deshecho")
+            send_message(f"↩️ <b>{esc(title)}</b> vuelve a estar pendiente. Te seguiré recordando.", uid)
         return
 
     if action == "rm":
         user = db.user(uid)
         if not user or user["status"] != "approved":
-            answer_callback(cq["id"], "No autorizado")
+            safe_answer(cq["id"], "No autorizado")
             return
         result = remove_course(db, uid, target)
-        answer_callback(cq["id"], "Curso quitado")
+        safe_answer(cq["id"], "Curso quitado")
         text_, buttons = my_courses(db, uid)
         send_message(result + "\n\n" + text_, uid, buttons=buttons or None)
         return
 
-    answer_callback(cq["id"])
+    safe_answer(cq["id"])
 
 
 # ================================================================ avisos por usuario
@@ -408,7 +547,7 @@ def notify_users(db: DB, agendas: dict, failed: list[str], now: datetime, quiet:
         pending = {k for m in msgs for k in m.keys}
         for m in msgs:
             try:
-                send_message(m.text, uid)
+                send_message(m.text, uid, buttons=delivery_buttons(db, m.keys) or None)
                 for k in m.keys:
                     new["sent"][k] = now.isoformat()
                     pending.discard(k)
@@ -468,9 +607,10 @@ def run_multi(dry_run: bool = False) -> int:
 
     if not dry_run:
         try:
-            if not db.state.get("commands_v2"):
+            if not db.state.get("commands_v3"):
                 set_commands(COMMANDS)
-                db.state["commands_v2"] = True
+                db.state["commands_v3"] = True
+            ensure_webhook(db)
             wants = process_updates(db, cache, os.environ.get("TELEGRAM_ADMIN_CODE", "").strip())
         except TelegramError as exc:
             log.error("No se pudieron leer los mensajes de Telegram: %s", exc)

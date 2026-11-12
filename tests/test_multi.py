@@ -57,7 +57,7 @@ def fake_fetch_factory(calls):
     return fake_fetch
 
 
-class MultiTest(unittest.TestCase):
+class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -72,7 +72,7 @@ class MultiTest(unittest.TestCase):
             "sent": {"welcome:x": "2026-11-12T09:15:00-05:00",
                      "summary:2026-11-12": "2026-11-12T09:15:00-05:00"},
             "course_names": {}}))
-        self.tg, self.fetch_calls = FakeTelegram(), []
+        self.tg, self.fetch_calls, self.webhooks = FakeTelegram(), [], []
         self.now = datetime(2026, 11, 12, 11, 7, tzinfo=BOGOTA)
         self.patches = [
             mock.patch.dict("os.environ", {"DATA_DIR": str(self.root), "TELEGRAM_ADMIN_CODE": ADMIN_CODE}),
@@ -81,6 +81,7 @@ class MultiTest(unittest.TestCase):
             mock.patch.object(MU, "edit_message", lambda c, m, t: self.tg.edits.append((str(c), t))),
             mock.patch.object(MU, "answer_callback", lambda *a, **k: None),
             mock.patch.object(MU, "set_commands", lambda c: None),
+            mock.patch.object(MU, "set_webhook", lambda u, sec: self.webhooks.append(u)),
             mock.patch.object(MU, "fetch", fake_fetch_factory(self.fetch_calls)),
             mock.patch.object(W, "fetch", fake_fetch_factory(self.fetch_calls)),
             mock.patch.object(W, "in_quiet_hours", lambda now: False),
@@ -102,6 +103,9 @@ class MultiTest(unittest.TestCase):
     def db(self):
         return MU.DB(self.root)
 
+
+
+class MultiTest(Base):
     # ------------------------------------------------------------------ registro
 
     def test_flujo_completo(self):
@@ -227,6 +231,77 @@ class MultiTest(unittest.TestCase):
         out = stream.getvalue()
         for secret in (CAMILO, EDUARDO, "Camilo", "Eduardo", ADMIN_CODE, "Formulación"):
             self.assertNotIn(secret, out)
+
+
+class EntregasYColaTest(Base):
+    def claim(self):
+        self.tg.msg(CAMILO, f"/start {ADMIN_CODE}")
+        self.run_bot()
+        self.tg.sent.clear()
+
+    def test_boton_entregada_detiene_recordatorios_y_se_puede_deshacer(self):
+        self.claim()
+        # 20 nov 7:07: recordatorio de la Fase 2 de Sostenibles (cierra mañana) con botón
+        self.run_bot(datetime(2026, 11, 20, 7, 7, tzinfo=BOGOTA))
+        rec = [(t, b) for c, t, b in self.tg.sent if c == CAMILO and "P5 del GPM" in t][0]
+        boton = rec[1][0][0][1]
+        self.assertTrue(boton.startswith("dl:"))
+        self.assertLessEqual(len(boton.encode()), 64)          # límite de Telegram
+        # la pulsa: queda entregada y ya no se le recuerda
+        self.tg.press(CAMILO, boton)
+        self.run_bot(datetime(2026, 11, 20, 9, 7, tzinfo=BOGOTA))
+        self.assertIn("102437376:fase-2-introduccion-al-estandar-p5-del-gpm",
+                      self.db().user(CAMILO)["delivered"])
+        self.assertIn("como entregada", self.tg.to(CAMILO)[-1])
+        self.tg.sent.clear()
+        self.run_bot(datetime(2026, 11, 21, 18, 7, tzinfo=BOGOTA))  # últimas horas de esa fase
+        self.assertFalse(any("P5 del GPM" in t for t in self.tg.to(CAMILO)))
+        # deshacer
+        self.tg.press(CAMILO, "ud:" + boton[3:])
+        self.run_bot(datetime(2026, 11, 21, 18, 37, tzinfo=BOGOTA))
+        self.assertNotIn("102437376:fase-2-introduccion-al-estandar-p5-del-gpm",
+                         self.db().user(CAMILO)["delivered"])
+
+    def test_otro_usuario_no_puede_marcar_mis_entregas(self):
+        self.claim()
+        db = self.db()
+        db.users["users"][EDUARDO] = MU.new_user({"first_name": "Eduardo"}, "approved")
+        db.save()
+        sid = MU.short_id("102437376:fase-2-introduccion-al-estandar-p5-del-gpm")
+        self.tg.press(EDUARDO, f"dl:{sid}")   # Eduardo no tiene ese curso
+        self.run_bot()
+        self.assertEqual(self.db().user(CAMILO)["delivered"], {})
+        self.assertEqual(self.db().user(EDUARDO)["delivered"], {})
+
+    def test_pendientes(self):
+        self.claim()
+        self.tg.msg(CAMILO, "/pendientes")
+        self.run_bot()
+        text, buttons = [(t, b) for c, t, b in self.tg.sent if c == CAMILO][-1]
+        self.assertIn("Te falta entregar", text)
+        self.assertIn("Proyecto de Grado", text)
+        self.assertNotIn("Fase 1 - Reconocimiento", text)      # ya cerró: no es pendiente
+        self.assertTrue(all(b[0][1].startswith("dl:") for b in buttons))
+
+    def test_cola_del_receptor_y_duplicados(self):
+        self.claim()
+        qdir = self.root / "queue"
+        qdir.mkdir(exist_ok=True)
+        upd = {"update_id": 9001, "message": {"chat": {"id": int(CAMILO), "type": "private"},
+                                              "from": {"id": int(CAMILO)}, "text": "/miscursos"}}
+        (qdir / "9001.json").write_text(json.dumps(upd))
+        with mock.patch.dict("os.environ", {"TELEGRAM_WEBHOOK_URL": "https://x.workers.dev",
+                                            "TELEGRAM_WEBHOOK_SECRET": "s"}):
+            with mock.patch.object(MU, "get_updates", side_effect=AssertionError("no debe llamarse")):
+                self.run_bot()
+                self.assertIn("Tus cursos", self.tg.to(CAMILO)[-1])
+                self.assertFalse(list(qdir.glob("*.json")))            # la cola quedó vacía
+                self.assertEqual(self.webhooks, ["https://x.workers.dev"])
+                # Telegram reenvía el mismo mensaje: no se atiende dos veces
+                (qdir / "9001.json").write_text(json.dumps(upd))
+                n = len(self.tg.sent)
+                self.run_bot()
+                self.assertEqual(len(self.tg.sent), n)
 
 
 if __name__ == "__main__":
