@@ -262,6 +262,23 @@ class EntregasYColaTest(Base):
         self.assertNotIn("102437376:fase-2-introduccion-al-estandar-p5-del-gpm",
                          self.db().user(CAMILO)["delivered"])
 
+    def test_entregadas_lista_y_deshacer(self):
+        self.claim()
+        self.tg.msg(CAMILO, "/entregadas")
+        self.run_bot()
+        self.assertIn("Aún no has marcado entregas", self.tg.to(CAMILO)[-1])
+        sid = MU.short_id("102437376:fase-2-introduccion-al-estandar-p5-del-gpm")
+        self.tg.press(CAMILO, f"dl:{sid}")
+        self.tg.msg(CAMILO, "/entregadas")
+        self.run_bot()
+        text, buttons = [(t, b) for c, t, b in self.tg.sent if c == CAMILO][-1]
+        self.assertIn("Entregadas (1)", text)
+        self.assertIn("Introducción al estándar P5", text)
+        self.assertEqual(buttons[0][0][1], f"ud:{sid}")
+        self.tg.press(CAMILO, f"ud:{sid}")
+        self.run_bot()
+        self.assertEqual(self.db().user(CAMILO)["delivered"], {})
+
     def test_otro_usuario_no_puede_marcar_mis_entregas(self):
         self.claim()
         db = self.db()

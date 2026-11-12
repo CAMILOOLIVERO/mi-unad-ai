@@ -43,6 +43,7 @@ CODE_RE = re.compile(r"(?<![\d/.-])\d{5,10}(?!\d)")
 
 COMMANDS = [("encurso", "Lo abierto y lo que cierra pronto"),
             ("pendientes", "Lo abierto que te falta entregar"),
+            ("entregadas", "Lo que ya marcaste como entregado"),
             ("agregar", "Agregar cursos con su código"),
             ("miscursos", "Ver y quitar tus cursos"),
             ("ayuda", "Cómo usar el bot")]
@@ -57,6 +58,7 @@ AYUDA = (
     "\"Mis Cursos Virtuales\": leo los códigos y te pido confirmar.\n\n"
     "/encurso — lo abierto y lo que cierra pronto\n"
     "/pendientes — lo abierto que te falta entregar (con botón ✅ para marcarlo)\n"
+    "/entregadas — lo que ya marcaste (con botón ↩️ para deshacer)\n"
     "/miscursos — tus cursos (con botón para quitar)\n"
     "/quitar 102437374 — quitar un curso\n"
     "/ayuda — este mensaje\n\n"
@@ -376,6 +378,30 @@ def pending_list(db: DB, uid: str, now: datetime) -> tuple[str, list[list[tuple[
     return "\n".join(lines), buttons
 
 
+def delivered_list(db: DB, uid: str) -> tuple[str, list[list[tuple[str, str]]]]:
+    """Lo que el usuario marcó como entregado, con botón para deshacer cada una."""
+    user = db.user(uid)
+    codes = user_codes(db, uid)
+    items = []
+    for ext, when in user.get("delivered", {}).items():
+        snap = db.state["activities"].get(ext, {})
+        if snap.get("course") in codes:
+            items.append((snap.get("due_at") or "", ext, snap, when))
+    if not items:
+        return ("Aún no has marcado entregas. Cuando entregues una actividad, toca "
+                "<b>✅ Ya la entregué</b> en su recordatorio o usa /pendientes.", [])
+    items.sort(key=lambda x: x[0])
+    lines, buttons = [f"✅ <b>Entregadas ({len(items)})</b>"], []
+    for _, ext, snap, when in items:
+        course = db.state["course_names"].get(snap.get("course")) or snap.get("course")
+        lines.append(f"\n📚 <b>{esc(course)}</b>\n      ▸ {esc(snap.get('title'))}\n"
+                     f"      ✔️ Marcada el {W.fecha_corta(when)} · cierre {W.fecha_corta(snap.get('due_at'))}")
+        fase = (snap.get("title") or "").split(" - ")[0][:12]
+        buttons.append([(f"↩️ {fase} · {short_course(course)}", f"ud:{short_id(ext)}")])
+    lines.append("\nSi marcaste una por error, toca ↩️ y vuelvo a recordártela.")
+    return "\n".join(lines), buttons
+
+
 def safe_answer(callback_id: str, text: str | None = None) -> None:
     """El receptor de Cloudflare ya pudo haber respondido el botón: ignorar ese error."""
     try:
@@ -526,6 +552,9 @@ def handle_message(db: DB, msg: dict, cache: dict, admin_code: str) -> bool:
         return True
     if cmd in ("ayuda", "help"):
         send_message(AYUDA, uid)
+    elif cmd == "entregadas":
+        text_, buttons = delivered_list(db, uid)
+        send_message(text_, uid, buttons=buttons or None)
     elif cmd == "pendientes":
         text_, buttons = pending_list(db, uid, datetime.now(BOGOTA))
         send_message(text_, uid, buttons=buttons or None)
@@ -730,9 +759,9 @@ def run_multi(dry_run: bool = False) -> int:
     if not dry_run:
         # cada paso por separado: si uno falla, los demás siguen
         try:
-            if not db.state.get("commands_v3"):
+            if not db.state.get("commands_v4"):
                 set_commands(COMMANDS)
-                db.state["commands_v3"] = True
+                db.state["commands_v4"] = True
         except TelegramError as exc:
             log.error("No se pudo registrar el menú de comandos: %s", exc)
         try:
