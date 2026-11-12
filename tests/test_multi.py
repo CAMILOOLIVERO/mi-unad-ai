@@ -278,10 +278,15 @@ class EntregasYColaTest(Base):
         self.tg.msg(CAMILO, "/pendientes")
         self.run_bot()
         text, buttons = [(t, b) for c, t, b in self.tg.sent if c == CAMILO][-1]
-        self.assertIn("Te falta entregar", text)
+        self.assertIn("Abiertas y sin entregar", text)
         self.assertIn("Proyecto de Grado", text)
         self.assertNotIn("Fase 1 - Reconocimiento", text)      # ya cerró: no es pendiente
+        self.assertNotIn("Fase 3 - Estudio de mercado", text)  # abre el 24 nov: aún no
+        self.assertIn("abren más adelante", text)
+        # el 12 nov hay 6 actividades abiertas (una por curso): 6 botones, no 15
+        self.assertEqual(len(buttons), 6)
         self.assertTrue(all(b[0][1].startswith("dl:") for b in buttons))
+        self.assertTrue(all(len(b[0][0]) <= 45 for b in buttons))  # caben en la pantalla
 
     def test_cola_del_receptor_y_duplicados(self):
         self.claim()

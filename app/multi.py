@@ -42,7 +42,7 @@ LINK_RE = re.compile(r"agendas/(\d{4}-\d{3,5})/(\d{5,10})\.htm", re.I)
 CODE_RE = re.compile(r"(?<![\d/.-])\d{5,10}(?!\d)")
 
 COMMANDS = [("encurso", "Lo abierto y lo que cierra pronto"),
-            ("pendientes", "Lo que te falta entregar"),
+            ("pendientes", "Lo abierto que te falta entregar"),
             ("agregar", "Agregar cursos con su código"),
             ("miscursos", "Ver y quitar tus cursos"),
             ("ayuda", "Cómo usar el bot")]
@@ -56,7 +56,7 @@ AYUDA = (
     "También sirve el enlace de la agenda del curso, o una <b>📸 captura</b> de "
     "\"Mis Cursos Virtuales\": leo los códigos y te pido confirmar.\n\n"
     "/encurso — lo abierto y lo que cierra pronto\n"
-    "/pendientes — lo que te falta entregar (con botón ✅ Ya la entregué)\n"
+    "/pendientes — lo abierto que te falta entregar (con botón ✅ para marcarlo)\n"
     "/miscursos — tus cursos (con botón para quitar)\n"
     "/quitar 102437374 — quitar un curso\n"
     "/ayuda — este mensaje\n\n"
@@ -333,33 +333,46 @@ def delivery_buttons(db: DB, keys: tuple[str, ...]) -> list[list[tuple[str, str]
     rows = []
     for ext in ext_ids[:10]:
         title, course = activity_label(db, ext)
-        fase = title.split(" - ")[0] if " - " in title else title[:20]
-        rows.append([(f"✅ Entregué {fase} · {course[:22]}", f"dl:{short_id(ext)}")])
+        fase = title.split(" - ")[0][:12] if " - " in title else title[:12]
+        rows.append([(f"✅ {fase} · {short_course(course)}", f"dl:{short_id(ext)}")])
     return rows
 
 
+def short_course(name: str) -> str:
+    """'Gestión de Proyectos Sostenibles' -> 'Gestión de Proyectos Sost…' para que quepa en un botón."""
+    return name if len(name) <= 24 else name[:23].rstrip() + "…"
+
+
 def pending_list(db: DB, uid: str, now: datetime) -> tuple[str, list[list[tuple[str, str]]]]:
+    """Solo lo ABIERTO ahora y sin entregar (lo que ya puedes y debes entregar)."""
     user = db.user(uid)
     codes, delivered = user_codes(db, uid), set(user.get("delivered", {}))
-    items = []
+    open_now, upcoming = [], 0
     for ext, v in db.state["activities"].items():
-        due = W.to_dt(v.get("due_at"))
-        if v.get("course") in codes and ext not in delivered and due and due > now:
-            items.append((due, ext, v))
-    if not items:
-        return "🎉 No tienes entregas pendientes en tus cursos.", []
-    items.sort(key=lambda x: x[0])
-    lines, buttons = ["📝 <b>Te falta entregar</b>"], []
-    for due, ext, v in items[:15]:
-        opens = W.to_dt(v.get("opens_at"))
-        estado = "🔜 abre " + W.fecha_corta(v.get("opens_at")) if opens and opens > now else                  f"🗓 cierra {W.fecha_corta(v.get('due_at'))} · faltan {W.tiempo_corto(due, now)}"
-        lines.append(f"\n📚 <b>{esc(db.state['course_names'].get(v['course']) or v['course'])}</b>\n"
-                     f"      ▸ {esc(v.get('title'))}\n      {estado}")
-        fase = (v.get("title") or "").split(" - ")[0][:20]
-        course = (db.state["course_names"].get(v["course"]) or "")[:22]
-        buttons.append([(f"✅ Entregué {fase} · {course}", f"dl:{short_id(ext)}")])
-    if len(items) > 15:
-        lines.append(f"\n… y {len(items) - 15} más.")
+        due, opens = W.to_dt(v.get("due_at")), W.to_dt(v.get("opens_at"))
+        if v.get("course") not in codes or ext in delivered or not due or due <= now:
+            continue
+        if opens and opens > now:
+            upcoming += 1           # aún no abre: no se puede entregar todavía
+        else:
+            open_now.append((due, ext, v))
+    if not open_now:
+        text = "🎉 No tienes entregas abiertas pendientes."
+        if upcoming:
+            text += f"\n\n🔜 {upcoming} actividad{'es' if upcoming != 1 else ''} abre{'n' if upcoming != 1 else ''} más adelante · /encurso para verlas"
+        return text, []
+    open_now.sort(key=lambda x: x[0])
+    lines, buttons = ["📝 <b>Abiertas y sin entregar</b>"], []
+    for due, ext, v in open_now:
+        course = db.state["course_names"].get(v["course"]) or v["course"]
+        lines.append(f"\n📚 <b>{esc(course)}</b>\n      ▸ {esc(v.get('title'))}\n"
+                     f"      🗓 Cierra {W.fecha_corta(v.get('due_at'))} · faltan {W.tiempo_corto(due, now)}")
+        fase = (v.get("title") or "").split(" - ")[0][:12]
+        buttons.append([(f"✅ {fase} · {short_course(course)}", f"dl:{short_id(ext)}")])
+    if upcoming:
+        lines.append(f"\n🔜 {upcoming} actividad{'es' if upcoming != 1 else ''} abre{'n' if upcoming != 1 else ''} "
+                     "más adelante · /encurso para verlas")
+    lines.append("\nToca el botón de la que ya entregaste.")
     return "\n".join(lines), buttons
 
 
