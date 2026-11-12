@@ -28,6 +28,9 @@ Cada estudiante habla con el bot **en privado**:
 1. Envía `/start`. El administrador recibe la solicitud y la aprueba con un botón.
 2. Agrega sus cursos enviando los **códigos** del Campus (el número del recuadro azul en
    "Mis Cursos Virtuales"), por ejemplo `102437374 202016902`, o el enlace de la agenda.
+   También puede enviar una **captura de "Mis Cursos Virtuales"**: el bot lee los códigos con OCR
+   (Tesseract, gratuito), descarta los que no tienen agenda y pide confirmar con botones.
+   La imagen no se guarda.
 3. Recibe **solo** los avisos de sus cursos. Las agendas compartidas se descargan una vez.
 
 Comandos: `/encurso`, `/pendientes`, `/miscursos` (con botón para quitar), `/quitar <código>`, `/ayuda`.

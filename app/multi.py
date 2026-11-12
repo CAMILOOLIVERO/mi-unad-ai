@@ -29,8 +29,9 @@ from pathlib import Path
 
 from app import watcher as W
 from app.automation.agenda_scraper import BOGOTA, URL_TEMPLATE, CourseAgenda, fetch, parse_agenda
-from app.notify.telegram import (TelegramError, answer_callback, edit_message, get_updates,
-                                 send_message, set_commands, set_webhook)
+from app.automation.ocr import OCRUnavailable, extract_codes
+from app.notify.telegram import (TelegramError, answer_callback, download_file, edit_message,
+                                 get_updates, send_message, set_commands, set_webhook)
 
 log = logging.getLogger("multi")
 
@@ -52,7 +53,8 @@ AYUDA = (
     "<b>Agregar cursos:</b> envíame los códigos (el número del recuadro azul en "
     "\"Mis Cursos Virtuales\"), separados por espacio. Ejemplo:\n"
     "<code>102437374 202016902</code>\n"
-    "También sirve el enlace de la agenda del curso.\n\n"
+    "También sirve el enlace de la agenda del curso, o una <b>📸 captura</b> de "
+    "\"Mis Cursos Virtuales\": leo los códigos y te pido confirmar.\n\n"
     "/encurso — lo abierto y lo que cierra pronto\n"
     "/pendientes — lo que te falta entregar (con botón ✅ Ya la entregué)\n"
     "/miscursos — tus cursos (con botón para quitar)\n"
@@ -123,11 +125,16 @@ def new_user(sender: dict, status: str, is_admin: bool = False) -> dict:
 
 # ================================================================ cursos
 
-def lookup(code: str, period: str | None, db: DB, cache: dict[str, CourseAgenda]) -> CourseAgenda | None:
+def lookup(code: str, period: str | None, db: DB, cache: dict[str, CourseAgenda],
+           extra_periods: list[str] | None = None) -> CourseAgenda | None:
     """Busca la agenda de un código probando los periodos conocidos (o el del enlace)."""
     if code in cache and (period is None or cache[code].period == period):
         return cache[code]
-    for p in ([period] if period else list(db.periods["known"])):
+    candidates = [period] if period else list(db.periods["known"])
+    for p in extra_periods or []:
+        if not period and p not in candidates:
+            candidates.append(p)
+    for p in candidates:
         url = URL_TEMPLATE.format(period=p, code=code)
         try:
             agenda = parse_agenda(fetch(url), code, p, url)
@@ -219,6 +226,71 @@ def my_courses(db: DB, uid: str) -> tuple[str, list[list[tuple[str, str]]]]:
         lines.append(f"• {esc(name)} <code>{c['code']}</code>")
         buttons.append([(f"🗑 Quitar {name[:40]}", f"rm:{c['code']}")])
     return "\n".join(lines), buttons
+
+
+# ================================================================ cursos desde una captura (OCR)
+
+def photo_file_id(msg: dict) -> str | None:
+    if msg.get("photo"):
+        return max(msg["photo"], key=lambda p: p.get("file_size") or p.get("width", 0))["file_id"]
+    doc = msg.get("document") or {}
+    if str(doc.get("mime_type", "")).startswith("image/"):
+        return doc.get("file_id")
+    return None
+
+
+def ocr_message(db: DB, uid: str) -> tuple[str, list[list[tuple[str, str]]]]:
+    pend = db.user(uid).get("ocr_pending") or {}
+    items, selected = pend.get("items", []), set(pend.get("selected", []))
+    lines = [f"📸 Encontré <b>{len(items)} curso{'s' if len(items) != 1 else ''}</b> en tu captura.",
+             "Toca un curso para marcarlo o desmarcarlo y luego <b>Agregar seleccionados</b>."]
+    if pend.get("already"):
+        lines.append("\nYa tenías: " + ", ".join(esc(n) for n in pend["already"]) + ".")
+    if pend.get("discarded"):
+        lines.append(f"<i>Descarté {pend['discarded']} número(s) que no correspondían a ningún curso.</i>")
+    buttons = [[(f"{'☑️' if it['code'] in selected else '⬜'} {it['name'][:45]}", f"tg:{it['code']}")]
+               for it in items]
+    buttons.append([(f"✅ Agregar seleccionados ({len(selected)})", "oa:"), ("✖️ Cancelar", "ox:")])
+    return "\n".join(lines), buttons
+
+
+def process_photo(db: DB, uid: str, msg: dict, cache: dict[str, CourseAgenda]) -> None:
+    send_message("📸 Leyendo tu captura… (puede tardar un minuto)", uid)
+    try:
+        codes, periods = extract_codes(download_file(photo_file_id(msg)))
+    except OCRUnavailable:
+        send_message("No pude leer imágenes en este momento. Envíame los códigos escritos, "
+                     "por ejemplo <code>102437374 202016902</code>.", uid)
+        return
+    except (TelegramError, OSError) as exc:
+        log.error("No se pudo procesar una captura: %s", type(exc).__name__)
+        send_message("No pude descargar la imagen. Intenta enviarla de nuevo.", uid)
+        return
+    user = db.user(uid)
+    mine = {c["code"] for c in user["courses"]}
+    items, already, discarded = [], [], 0
+    for code in codes[:MAX_CODES_PER_MESSAGE]:
+        if code in mine:
+            already.append(db.state["course_names"].get(code) or code)
+            continue
+        try:
+            agenda = lookup(code, None, db, cache, extra_periods=periods)
+        except (urllib.error.URLError, OSError):
+            agenda = None
+        if agenda:
+            items.append({"code": code, "period": agenda.period, "name": agenda.name or code})
+        else:
+            discarded += 1
+    if not items:
+        extra = (" Ya tienes todos los cursos de la captura." if already else
+                 " Asegúrate de que se vean los recuadros azules con los códigos, "
+                 "o envíame los códigos escritos.")
+        send_message("No encontré cursos nuevos en la imagen." + extra, uid)
+        return
+    user["ocr_pending"] = {"items": items, "selected": [it["code"] for it in items],
+                           "already": already, "discarded": discarded}
+    text, buttons = ocr_message(db, uid)
+    send_message(text, uid, buttons=buttons)
 
 
 # ================================================================ entregas
@@ -429,6 +501,9 @@ def handle_message(db: DB, msg: dict, cache: dict, admin_code: str) -> bool:
             send_message("Hola 👋 Envía /start para solicitar acceso.", uid)
         return False
 
+    if photo_file_id(msg):
+        process_photo(db, uid, msg, cache)
+        return False
     if cmd in ("encurso", "resumen"):
         return True
     if cmd in ("ayuda", "help"):
@@ -494,6 +569,35 @@ def handle_callback(db: DB, cq: dict) -> None:
             user.get("delivered", {}).pop(ext, None)
             safe_answer(cq["id"], "↩️ Deshecho")
             send_message(f"↩️ <b>{esc(title)}</b> vuelve a estar pendiente. Te seguiré recordando.", uid)
+        return
+
+    if action in ("tg", "oa", "ox"):
+        user = db.user(uid)
+        pend = (user or {}).get("ocr_pending")
+        if not user or user["status"] != "approved" or not pend:
+            safe_answer(cq["id"], "Esa selección ya no está activa")
+            return
+        if action == "tg":
+            sel = set(pend["selected"])
+            sel.symmetric_difference_update({target})
+            pend["selected"] = [it["code"] for it in pend["items"] if it["code"] in sel]
+            text_, buttons = ocr_message(db, uid)
+            safe_answer(cq["id"])
+            edit_message(chat_id, message_id, text_, buttons)
+            return
+        user.pop("ocr_pending", None)
+        if action == "ox":
+            safe_answer(cq["id"], "Cancelado")
+            edit_message(chat_id, message_id, "✖️ Cancelaste la selección. No agregué ningún curso.")
+            return
+        chosen = [it for it in pend["items"] if it["code"] in set(pend["selected"])]
+        safe_answer(cq["id"], "Agregando…")
+        if not chosen:
+            edit_message(chat_id, message_id, "No seleccionaste ningún curso.")
+            return
+        edit_message(chat_id, message_id, f"📸 Agregando {len(chosen)} curso(s) de tu captura…")
+        links = " ".join(f"agendas/{it['period']}/{it['code']}.htm" for it in chosen)
+        send_message(add_courses(db, uid, links, {}), uid)
         return
 
     if action == "rm":

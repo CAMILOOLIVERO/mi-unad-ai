@@ -111,10 +111,15 @@ def answer_callback(callback_id: str, text: str | None = None) -> None:
     _call("answerCallbackQuery", payload)
 
 
-def edit_message(chat_id: str | int, message_id: int, text: str) -> None:
-    """Reemplaza el texto de un mensaje y le quita los botones."""
-    _call("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text,
-                              "parse_mode": "HTML", "disable_web_page_preview": True})
+def edit_message(chat_id: str | int, message_id: int, text: str,
+                 buttons: list[list[tuple[str, str]]] | None = None) -> None:
+    """Reemplaza el texto de un mensaje (sin buttons, le quita los botones)."""
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text,
+               "parse_mode": "HTML", "disable_web_page_preview": True}
+    if buttons:
+        payload["reply_markup"] = {"inline_keyboard": [
+            [{"text": t, "callback_data": d} for t, d in row] for row in buttons]}
+    _call("editMessageText", payload)
 
 
 def get_me() -> dict:
@@ -151,3 +156,23 @@ def set_webhook(url: str, secret: str) -> None:
     """Telegram enviará cada mensaje al instante a esta URL (el receptor de Cloudflare)."""
     _call("setWebhook", {"url": url, "secret_token": secret,
                          "allowed_updates": ["message", "callback_query"]})
+
+
+MAX_DOWNLOAD = 10 * 1024 * 1024  # 10 MB: una captura de pantalla pesa mucho menos
+
+
+def download_file(file_id: str) -> bytes:
+    """Descarga un archivo enviado al bot (p. ej. la captura de "Mis Cursos")."""
+    info = _call("getFile", {"file_id": file_id})
+    path = (info or {}).get("file_path")
+    if not path or (info.get("file_size") or 0) > MAX_DOWNLOAD:
+        raise TelegramError("Archivo no disponible o demasiado grande")
+    url = f"https://api.telegram.org/file/bot{_env('TELEGRAM_BOT_TOKEN')}/{path}"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=60) as resp:
+            data = resp.read(MAX_DOWNLOAD + 1)
+    except Exception as exc:  # noqa: BLE001 - el mensaje de error podría incluir la URL con el token
+        raise TelegramError(f"No se pudo descargar el archivo ({type(exc).__name__})") from None
+    if len(data) > MAX_DOWNLOAD:
+        raise TelegramError("Archivo demasiado grande")
+    return data

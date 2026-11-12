@@ -304,5 +304,93 @@ class EntregasYColaTest(Base):
                 self.assertEqual(len(self.tg.sent), n)
 
 
+class FotoTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.tg.msg(EDUARDO, "/start")  # Eduardo pide acceso…
+        self.tg.msg(CAMILO, f"/start {ADMIN_CODE}")
+        self.run_bot()
+        db = self.db()
+        db.users["users"][EDUARDO] = MU.new_user({"first_name": "Eduardo"}, "approved")
+        db.user(EDUARDO)["courses"] = [{"code": "102437374", "period": "2026-2205"}]
+        db.save()
+        self.tg.sent.clear()
+
+    def send_photo(self, uid):
+        self.tg.inbox.append({"update_id": self.tg.next_id, "message": {
+            "chat": {"id": int(uid), "type": "private"}, "from": {"id": int(uid)},
+            "photo": [{"file_id": "chico", "file_size": 10}, {"file_id": "grande", "file_size": 900}]}})
+        self.tg.next_id += 1
+
+    def ocr(self, codes, periods=("2026-2205", "2026-2204")):
+        downloads = []
+        return (mock.patch.object(MU, "download_file", lambda fid: downloads.append(fid) or b"png"),
+                mock.patch.object(MU, "extract_codes", lambda data: (list(codes), list(periods))),
+                downloads)
+
+    def last_buttons(self, uid):
+        return [b for c, t, b in self.tg.sent if c == uid and b][-1]
+
+    def test_captura_seleccion_y_confirmacion(self):
+        p1, p2, downloads = self.ocr(["102437374", "212064", "202016907", "02037376"])
+        with p1, p2:
+            self.send_photo(EDUARDO)
+            self.run_bot()
+        self.assertEqual(downloads, ["grande"])                      # la foto de mayor calidad
+        text = [t for c, t, b in self.tg.sent if c == EDUARDO and "Encontré" in t][0]
+        self.assertIn("Encontré <b>2 cursos</b>", text)
+        self.assertIn("Ya tenías: Formulación Integral de Proyectos", text)
+        self.assertIn("Descarté 1 número", text)                     # el número falso del OCR
+        botones = self.last_buttons(EDUARDO)
+        self.assertTrue(botones[0][0][0].startswith("☑️ Inferencia"))
+        # desmarca Inferencia (reprobada) y confirma
+        edits = []
+        with mock.patch.object(MU, "edit_message", lambda c, m, t, b=None: edits.append((t, b))):
+            self.tg.press(EDUARDO, "tg:212064")
+            self.run_bot()
+            self.assertTrue(edits[-1][1][0][0][0].startswith("⬜ Inferencia"))
+            self.tg.press(EDUARDO, "oa:")
+            self.run_bot()
+        codes = {c["code"] for c in self.db().user(EDUARDO)["courses"]}
+        self.assertEqual(codes, {"102437374", "202016907"})           # agregó solo lo marcado
+        self.assertTrue(any("✅ <b>Proyecto de Grado</b>" in t for t in self.tg.to(EDUARDO)))
+        self.assertNotIn("ocr_pending", self.db().user(EDUARDO))
+
+    def test_cancelar_no_agrega_nada(self):
+        p1, p2, _ = self.ocr(["212064"])
+        with p1, p2:
+            self.send_photo(EDUARDO)
+            self.run_bot()
+            self.tg.press(EDUARDO, "ox:")
+            self.run_bot()
+        self.assertEqual({c["code"] for c in self.db().user(EDUARDO)["courses"]}, {"102437374"})
+
+    def test_sin_cursos_en_la_imagen(self):
+        p1, p2, _ = self.ocr(["99999999"])
+        with p1, p2:
+            self.send_photo(EDUARDO)
+            self.run_bot()
+        self.assertTrue(any("No encontré cursos nuevos" in t for t in self.tg.to(EDUARDO)))
+
+    def test_sin_ocr_disponible(self):
+        def no_ocr(data):
+            raise MU.OCRUnavailable("x")
+        with mock.patch.object(MU, "download_file", lambda fid: b"png"), \
+             mock.patch.object(MU, "extract_codes", no_ocr):
+            self.send_photo(EDUARDO)
+            self.run_bot()
+        self.assertTrue(any("Envíame los códigos escritos" in t for t in self.tg.to(EDUARDO)))
+
+    def test_pendiente_no_puede_enviar_fotos(self):
+        db = self.db()
+        db.user(EDUARDO)["status"] = "pending"
+        db.save()
+        p1, p2, downloads = self.ocr(["212064"])
+        with p1, p2:
+            self.send_photo(EDUARDO)
+            self.run_bot()
+        self.assertEqual(downloads, [])                               # ni siquiera la descarga
+
+
 if __name__ == "__main__":
     unittest.main()
